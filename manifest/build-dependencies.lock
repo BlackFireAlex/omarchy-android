@@ -1,0 +1,5 @@
+# parent|name|type|upstream|revision
+hyprland|hyprland-protocols|submodule|https://github.com/hyprwm/hyprland-protocols.git|bd153e76f751f150a09328dbdeb5e4fab9d23622
+hyprland|tracy|submodule|https://github.com/wolfpld/tracy.git|05cceee0df3b8d7c6fa87e9638af311dbabc63cb
+hyprland|udis86|submodule|https://github.com/canihavesomecoffee/udis86.git|5336633af70f3917760a6d441ff02d93477b0c86
+hyprland|glaze|fetch-content|https://github.com/stephenberry/glaze.git|b518eec7a22e56ffa238b072c07f47efa7cea97f

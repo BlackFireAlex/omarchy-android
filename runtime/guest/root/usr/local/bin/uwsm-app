@@ -1,0 +1,13 @@
+#!/bin/sh
+
+# Omarchy routes graphical applications through UWSM's systemd user daemon.
+# PRoot has no systemd user manager, but applications already inherit the
+# complete Wayland session environment from Hyprland/QuickShell. In that mode,
+# launch the requested native ARM64 process directly.
+if [ "${OMARCHY_PROOT:-0}" = 1 ]; then
+  [ "${1:-}" = "--" ] && shift
+  [ "$#" -gt 0 ] || exit 1
+  exec "$@"
+fi
+
+exec /usr/bin/uwsm-app "$@"

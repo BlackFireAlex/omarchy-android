@@ -1,0 +1,13 @@
+
+[Default Applications]
+inode/directory=org.gnome.Nautilus.desktop
+text/html=chromium.desktop
+x-scheme-handler/http=chromium.desktop
+x-scheme-handler/https=chromium.desktop
+x-scheme-handler/about=chromium.desktop
+x-scheme-handler/unknown=chromium.desktop
+x-scheme-handler/mailto=HEY.desktop
+x-scheme-handler/jetbrains=jetbrainsd.desktop
+
+[Added Associations]
+inode/directory=org.gnome.Nautilus.desktop;

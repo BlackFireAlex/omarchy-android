@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+
+set -u
+
+termux_prefix="${PREFIX:-/data/data/com.termux/files/usr}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+config_file="${OMARCHY_ANDROID_CONFIG:-$script_dir/../config/runtime.conf}"
+if [[ -r "$config_file" ]]; then
+  # shellcheck source=/dev/null
+  source "$config_file"
+fi
+runtime="${OMARCHY_RUNTIME_DIR:-/data/data/com.termux/r}"
+container="${OMARCHY_CONTAINER:-omarchy-android}"
+state_dir="${OMARCHY_STATE_DIR:-$HOME/.local/state/$container}"
+keep_x=false
+[[ "${1:-}" == "--keep-x" ]] && keep_x=true
+
+pid_matches() {
+  local pid="$1" expected="$2" cmdline
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+  cmdline="$( { tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null || true)"
+  [[ "$cmdline" == *"$expected"* ]]
+}
+
+stop_one() {
+  local name="$1" expected="$2" pid_file="$state_dir/$1.pid" pid
+  [[ -r "$pid_file" ]] || return 0
+  read -r pid < "$pid_file"
+  if pid_matches "$pid" "$expected"; then
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  fi
+}
+
+stop_one guard omarchy-process-guard
+stop_one proot "$container"
+stop_one virgl virgl_test_server_android
+stop_one weston weston
+if ! $keep_x; then
+  stop_one x11 termux-x11
+fi
+
+# Recover processes created before PID tracking existed, or whose PID file was
+# lost in an interrupted Termux session. Both markers must match, keeping this
+# sweep strictly scoped to this Omarchy stack.
+stop_orphans() {
+  local marker_a="$1" marker_b="$2" proc_dir pid cmdline
+  local -a matched=()
+  for proc_dir in /proc/[0-9]*; do
+    pid="${proc_dir##*/}"
+    [[ "$pid" != "$$" && -r "$proc_dir/cmdline" ]] || continue
+    cmdline="$( { tr '\0' ' ' < "$proc_dir/cmdline"; } 2>/dev/null || true)"
+    if [[ "$cmdline" == *"$marker_a"* && "$cmdline" == *"$marker_b"* ]]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      matched+=("$pid")
+    fi
+  done
+  sleep 0.3
+  for pid in "${matched[@]}"; do
+    [[ -r "/proc/$pid/cmdline" ]] || continue
+    cmdline="$( { tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null || true)"
+    if [[ "$cmdline" == *"$marker_a"* && "$cmdline" == *"$marker_b"* ]]; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+stop_orphans "--rootfs=" "/containers/$container/rootfs"
+stop_orphans "virgl_test_server_android" "/data/data/com.termux/r/.virgl-omarchy"
+stop_orphans "weston" "--socket=wayland-omarchy"
+stop_orphans "omarchy-process-guard" "$state_dir"
+
+# PipeWire probes have previously escaped a short-lived diagnostic PRoot and
+# spun forever. Remove only exact commands that still map this Omarchy rootfs.
+for proc_dir in /proc/[0-9]*; do
+  pid="${proc_dir##*/}"
+  [[ "$pid" != "$$" && -r "$proc_dir/cmdline" && -r "$proc_dir/maps" ]] || continue
+  cmdline="$( { tr '\0' ' ' < "$proc_dir/cmdline"; } 2>/dev/null || true)"
+  case "$cmdline" in
+    'wpctl status '|'dbus-daemon --nofork --print-address 5 --session ')
+      if grep -q "/containers/$container/rootfs" "$proc_dir/maps" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+      ;;
+  esac
+done
+
+for _ in {1..30}; do
+  any_live=false
+  for item in "proot:$container" "virgl:virgl_test_server_android" "weston:weston"; do
+    name="${item%%:*}"
+    expected="${item#*:}"
+    if [[ -r "$state_dir/$name.pid" ]]; then
+      read -r pid < "$state_dir/$name.pid"
+      pid_matches "$pid" "$expected" && any_live=true
+    fi
+  done
+  $any_live || break
+  sleep 0.1
+done
+
+for item in "proot:$container" "virgl:virgl_test_server_android" "weston:weston"; do
+  name="${item%%:*}"
+  expected="${item#*:}"
+  if [[ -r "$state_dir/$name.pid" ]]; then
+    read -r pid < "$state_dir/$name.pid"
+    if pid_matches "$pid" "$expected"; then
+      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+done
+
+rm -f \
+  "$runtime/wayland-omarchy" "$runtime/wayland-omarchy.lock" \
+  "$runtime/wayland-1" "$runtime/wayland-1.lock" \
+  "$runtime/.virgl-omarchy" \
+  "$state_dir/guard.pid" "$state_dir/proot.pid" "$state_dir/virgl.pid" "$state_dir/weston.pid"
+
+# These are IPC/cache trees inside the dedicated short runtime, never user
+# data. Removing stale instance sockets prevents control commands from binding
+# to a compositor that no longer exists.
+if [[ "$runtime" == "/data/data/com.termux/r" ]]; then
+  for ipc_tree in "$runtime/hypr" "$runtime/Quickshell"; do
+    if [[ -d "$ipc_tree" ]]; then
+      find "$ipc_tree" -mindepth 1 -depth -delete 2>/dev/null || true
+      rmdir "$ipc_tree" 2>/dev/null || true
+    fi
+  done
+fi
+
+if ! $keep_x; then
+  if [[ -r "$state_dir/x11.pid" ]]; then
+    read -r pid < "$state_dir/x11.pid"
+    if pid_matches "$pid" termux-x11; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$state_dir/x11.pid" \
+    "$termux_prefix/tmp/.X1-lock" "$termux_prefix/tmp/.X11-unix/X1"
+  termux-wake-unlock >/dev/null 2>&1 || true
+fi
+
+echo "Omarchy stopped."

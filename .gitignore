@@ -1,0 +1,11 @@
+.work/
+build/
+dist/
+runtime/host/bin/
+coverage/
+*.apk
+*.tar
+*.tar.gz
+*.tar.zst
+*.tmp
+.env

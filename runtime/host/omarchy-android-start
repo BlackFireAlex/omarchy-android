@@ -1,0 +1,700 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+config_file="${OMARCHY_ANDROID_CONFIG:-$script_dir/../config/runtime.conf}"
+if [[ -r "$config_file" ]]; then
+  # shellcheck source=/dev/null
+  source "$config_file"
+fi
+
+termux_prefix="${PREFIX:-/data/data/com.termux/files/usr}"
+runtime="${OMARCHY_RUNTIME_DIR:-/data/data/com.termux/r}"
+container="${OMARCHY_CONTAINER:-omarchy-android}"
+state_dir="${OMARCHY_STATE_DIR:-$HOME/.local/state/$container}"
+rootfs="$termux_prefix/var/lib/proot-distro/containers/$container/rootfs"
+pci_devices_stub="$state_dir/pci-devices.stub"
+display_number=":1"
+task_uid="$(id -u)"
+process_limit="${OMARCHY_PROCESS_LIMIT:-28}"
+unlimited_processes=0
+# Direct Freedreno/KGSL passed both Vulkan and EGL draw/present tests on this
+# Adreno 840. Keep virgl available only as an explicit recovery fallback.
+gpu_mode="${OMARCHY_GPU_MODE:-kgsl}"
+# Chromium's GBM path and the compositor must use the same Mesa memory model
+# for zero-copy DMA-BUF import.  Keep this independently selectable while the
+# Zink-on-Turnip compositor path is validated against the direct KGSL fallback.
+compositor_gl_driver="${OMARCHY_COMPOSITOR_GL_DRIVER:-kgsl}"
+guest_mesa_prefix="${OMARCHY_MESA_PREFIX:-/opt/omarchy-android/mesa/root/usr}"
+guest_turnip_icd="${OMARCHY_TURNIP_ICD:-/opt/omarchy-android/mesa/freedreno_icd.json}"
+# Keep experimental compositor builds side-by-side with the known-good stage.
+# These overrides let validation roll back without copying or replacing files.
+aquamarine_stage="${OMARCHY_AQUAMARINE_STAGE:-/opt/omarchy-android/aquamarine}"
+hyprland_stage="${OMARCHY_HYPRLAND_STAGE:-/opt/omarchy-android/hyprland}"
+android_dmabuf_heap="${OMARCHY_ANDROID_DMABUF_HEAP:-0}"
+android_dmabuf_glfinish="${OMARCHY_ANDROID_DMABUF_GLFINISH:-0}"
+android_dmabuf_vulkan="${OMARCHY_ANDROID_DMABUF_VULKAN:-0}"
+hyprland_android_dmabuf="${OMARCHY_HYPRLAND_ANDROID_DMABUF:-1}"
+# SHM output is the compatibility path used when the nested Wayland backend
+# cannot import a GPU buffer directly. Keep synchronization, damage-limited
+# copies, and profiling independently switchable while experimental builds are
+# measured; the known-good stage ignores these variables.
+hyprland_shm_glfinish="${HYPRLAND_SHM_GLFINISH:-0}"
+hyprland_shm_damage="${HYPRLAND_SHM_DAMAGE:-1}"
+hyprland_shm_profile="${HYPRLAND_SHM_PROFILE:-0}"
+hyprland_gl_dmabuf_export="${HYPRLAND_GL_DMABUF_EXPORT:-1}"
+# Optional staged X11 backend. The Android build derives its output cadence
+# from Termux:X11's active XRandR mode instead of Weston's fixed 60 Hz mode.
+weston_x11_module="${OMARCHY_WESTON_X11_MODULE:-$script_dir/../opt/weston/lib/libweston-14/x11-backend.so}"
+refresh_mhz="${OMARCHY_REFRESH_MHZ:-120000}"
+ui_scale="${OMARCHY_SCALE:-2}"
+share_mode="${OMARCHY_SHARE:-none}"
+audio_enabled="${OMARCHY_AUDIO:-1}"
+keyboard_layout="${OMARCHY_KEYBOARD_LAYOUT:-auto}"
+
+if [[ ! "$process_limit" =~ ^[0-9]+$ ]] || (( process_limit < 8 )); then
+  echo "OMARCHY_PROCESS_LIMIT must be an integer of at least 8." >&2
+  exit 1
+fi
+case "$ui_scale" in
+  1|1.25|1.5|1.75|2) ;;
+  *) echo "Unsupported OMARCHY_SCALE=$ui_scale." >&2; exit 1 ;;
+esac
+case "$audio_enabled" in
+  1|true|yes) audio_enabled=1 ;;
+  0|false|no) audio_enabled=0 ;;
+  *) echo "OMARCHY_AUDIO must be 1 or 0." >&2; exit 1 ;;
+esac
+if [[ "$keyboard_layout" == auto ]]; then
+  android_locale="$(getprop persist.sys.locale 2>/dev/null || true)"
+  [[ -n "$android_locale" ]] || android_locale="$(getprop ro.product.locale 2>/dev/null || true)"
+  case "$android_locale" in
+    fr*|FR*) keyboard_layout=fr ;;
+    *) keyboard_layout=us ;;
+  esac
+fi
+if [[ ! "$keyboard_layout" =~ ^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$ ]]; then
+  echo "Invalid OMARCHY_KEYBOARD_LAYOUT=$keyboard_layout." >&2
+  exit 1
+fi
+
+# Android's "Disable child process restrictions" developer option persists
+# this override as false. In that mode the old phantom-process ceiling is no
+# longer relevant, so retain only a generous fork-bomb safety backstop.
+if [[ "$(getprop persist.sys.fflag.override.settings_enable_monitor_phantom_procs 2>/dev/null)" == "false" ]]; then
+  unlimited_processes=1
+fi
+
+mkdir -p "$runtime" "$state_dir"
+chmod 700 "$runtime" "$state_dir"
+
+# Android's procfs exposes /proc/bus/pci but denies its devices file to apps.
+# This ARM/KGSL machine has no PCI GPU, yet Chromium's Linux hardware probe
+# treats that denial as fatal before it can initialize EGL or Vulkan. Present
+# the accurate empty PCI inventory inside this PRoot session; /dev/kgsl and
+# the real /sys tree remain bound normally for Mesa/Turnip.
+install -m 0444 /dev/null "$pci_devices_stub"
+
+required_commands=(termux-x11 termux-x11-preference weston proot-distro xwininfo timeout)
+if (( audio_enabled == 1 )); then
+  required_commands+=(pulseaudio pactl)
+fi
+for required in "${required_commands[@]}"; do
+  if ! command -v "$required" >/dev/null 2>&1; then
+    echo "Missing required command: $required" >&2
+    exit 1
+  fi
+done
+
+# A failed PipeWire probe under PRoot can leave wpctl and its private D-Bus
+# daemon spinning after their launcher exits. They have consumed three full
+# cores in practice. Match both the exact command and this container's mapped
+# files so unrelated Termux sessions are never touched.
+stop_stale_guest_audio_probes() {
+  local proc_dir pid cmdline
+  local -a matched=()
+
+  for proc_dir in /proc/[0-9]*; do
+    pid="${proc_dir##*/}"
+    [[ "$pid" != "$$" && -r "$proc_dir/cmdline" && -r "$proc_dir/maps" ]] || continue
+    cmdline="$( { tr '\0' ' ' < "$proc_dir/cmdline"; } 2>/dev/null || true)"
+    case "$cmdline" in
+      'wpctl status '|'dbus-daemon --nofork --print-address 5 --session ')
+        if grep -q "/containers/$container/rootfs" "$proc_dir/maps" 2>/dev/null; then
+          kill -TERM "$pid" 2>/dev/null || true
+          matched+=("$pid")
+        fi
+        ;;
+    esac
+  done
+
+  sleep 0.2
+  for pid in "${matched[@]}"; do
+    [[ -r "/proc/$pid/cmdline" ]] || continue
+    cmdline="$( { tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null || true)"
+    case "$cmdline" in
+      'wpctl status '|'dbus-daemon --nofork --print-address 5 --session ')
+        kill -KILL "$pid" 2>/dev/null || true
+        ;;
+    esac
+  done
+}
+
+stop_stale_guest_audio_probes
+
+# Android does not expose ALSA devices to ordinary applications. Termux's
+# PulseAudio build can, however, render through Android's native AAudio API.
+# PRoot cannot reliably pass PulseAudio's credential-bearing Unix handshake,
+# so publish the native protocol only on Android's loopback interface. This is
+# reachable from the guest but never exposed to Wi-Fi or mobile networks.
+ensure_audio_bridge() {
+  local pulse_runtime="$state_dir/pulse-runtime"
+  local pulse_state="$state_dir/pulse-state"
+  local pulse_pid=""
+
+  # A stale native-protocol connection can leave pactl waiting forever even
+  # though its PulseAudio daemon is no longer usable. TERM alone is not always
+  # enough to release that client, so every bridge probe has a short KILL
+  # deadline as well. Desktop startup must never block indefinitely on audio.
+  pulse_server_responding() {
+    PULSE_SERVER=tcp:127.0.0.1:4715 \
+      timeout --kill-after=0.2 0.5 pactl info >/dev/null 2>&1
+  }
+
+  if ! pulse_server_responding; then
+    mkdir -p "$pulse_runtime" "$pulse_state"
+    chmod 700 "$pulse_runtime" "$pulse_state"
+
+    # Clean only this dedicated daemon's validated runtime after an unclean
+    # Android process kill. No shared Termux PulseAudio state is touched.
+    if [[ -r "$pulse_runtime/pid" ]]; then
+      read -r pulse_pid < "$pulse_runtime/pid"
+      if [[ "$pulse_pid" =~ ^[0-9]+$ ]]; then
+        kill -TERM "$pulse_pid" 2>/dev/null || true
+        sleep 0.2
+      fi
+    fi
+    [[ -S "$pulse_runtime/native" ]] && unlink "$pulse_runtime/native"
+    [[ -f "$pulse_runtime/pid" ]] && unlink "$pulse_runtime/pid"
+
+    PULSE_RUNTIME_PATH="$pulse_runtime" PULSE_STATE_PATH="$pulse_state" \
+      pulseaudio -n --daemonize=yes --exit-idle-time=-1 \
+      --log-target="file:$state_dir/pulse.log" \
+      -L module-aaudio-sink \
+      -L module-native-protocol-unix \
+      -L 'module-native-protocol-tcp listen=127.0.0.1 port=4715 auth-ip-acl=127.0.0.1' || return 1
+
+    for _ in {1..20}; do
+      pulse_server_responding && break
+      sleep 0.1
+    done
+  fi
+
+  pulse_server_responding || return 1
+  PULSE_SERVER=tcp:127.0.0.1:4715 \
+    timeout --kill-after=0.5 1 pactl set-default-sink AAudio_sink >/dev/null
+}
+
+guest_audio_env=()
+if (( audio_enabled == 1 )); then
+  if ! ensure_audio_bridge; then
+    echo "Warning: Android audio bridge could not be started; continuing without sound." >&2
+  else
+    guest_audio_env=(-e PULSE_SERVER=tcp:127.0.0.1:4715)
+  fi
+fi
+
+case "$gpu_mode" in
+  kgsl)
+    if [[ ! -r /dev/kgsl-3d0 || ! -w /dev/kgsl-3d0 ]]; then
+      echo "Direct KGSL mode needs read/write access to /dev/kgsl-3d0." >&2
+      exit 1
+    fi
+    if [[ ! -f "$rootfs$guest_mesa_prefix/lib/libvulkan_freedreno.so" ||
+          ! -f "$rootfs$guest_mesa_prefix/lib/dri/kgsl_dri.so" ||
+          ! -f "$rootfs$guest_turnip_icd" ]]; then
+      echo "The private Mesa KGSL build is incomplete: $guest_mesa_prefix" >&2
+      exit 1
+    fi
+    guest_gpu_env=(
+      -e MESA_LOADER_DRIVER_OVERRIDE="$compositor_gl_driver"
+      -e LIBGL_DRIVERS_PATH="$guest_mesa_prefix/lib/dri"
+      -e VK_ICD_FILENAMES="$guest_turnip_icd"
+      -e LD_LIBRARY_PATH="$guest_mesa_prefix/lib:$aquamarine_stage/lib"
+    )
+    if [[ "$compositor_gl_driver" == "zink" ]]; then
+      guest_gpu_env+=( -e GALLIUM_DRIVER=zink )
+    elif [[ "$compositor_gl_driver" == "kgsl" ]]; then
+      # The Android Freedreno fork gates native dma-buf sharing behind this
+      # flag.  Clients such as Chromium need the compositor's EGL screen to
+      # import their zero-copy Wayland buffers through the same KGSL driver.
+      guest_gpu_env+=( -e FD_KGSL_ENABLE_DMABUF=1 )
+    elif [[ "$compositor_gl_driver" != "kgsl" ]]; then
+      echo "Unsupported OMARCHY_COMPOSITOR_GL_DRIVER=$compositor_gl_driver (use kgsl or zink)." >&2
+      exit 1
+    fi
+    ;;
+  virgl)
+    if ! command -v virgl_test_server_android >/dev/null 2>&1; then
+      echo "Missing required command: virgl_test_server_android" >&2
+      exit 1
+    fi
+    guest_gpu_env=(
+      -e GALLIUM_DRIVER=virpipe
+      -e MESA_LOADER_DRIVER_OVERRIDE=virpipe
+      -e VTEST_SOCKET_NAME=/run/user/1000/.virgl-omarchy
+      -e LD_LIBRARY_PATH="$aquamarine_stage/lib"
+    )
+    ;;
+  *)
+    echo "Unsupported OMARCHY_GPU_MODE=$gpu_mode (use kgsl or virgl)." >&2
+    exit 1
+    ;;
+esac
+
+if [[ ! -x "$rootfs$hyprland_stage/bin/Hyprland" ]]; then
+  echo "The selected ARM64 Hyprland build is missing: $hyprland_stage" >&2
+  exit 1
+fi
+
+weston_module_env=()
+if [[ -n "$weston_x11_module" ]]; then
+  if [[ ! -f "$weston_x11_module" ]]; then
+    echo "The selected Weston X11 backend is missing: $weston_x11_module" >&2
+    exit 1
+  fi
+  weston_module_env=("WESTON_MODULE_MAP=x11-backend.so=$weston_x11_module")
+fi
+if [[ ! "$refresh_mhz" =~ ^[0-9]+$ ]] || (( refresh_mhz < 30000 || refresh_mhz > 240000 )); then
+  echo "OMARCHY_REFRESH_MHZ must be between 30000 and 240000." >&2
+  exit 1
+fi
+
+pid_is_live() {
+  local pid_file="$1" expected="$2" pid cmdline
+  [[ -r "$pid_file" ]] || return 1
+  read -r pid < "$pid_file"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+  cmdline="$( { tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null || true)"
+  [[ "$cmdline" == *"$expected"* ]]
+}
+
+# The command runner cleans up direct descendants when it returns. setsid -f
+# forks first; this wrapper records the detached child's real PID before exec.
+launch_detached() {
+  local pid_file="$1" log_file="$2"
+  shift 2
+  rm -f "$pid_file"
+  setsid -f bash -c '
+    pid_file="$1"
+    log_file="$2"
+    shift 2
+    printf "%s\n" "$$" > "$pid_file"
+    exec "$@" >> "$log_file" 2>&1
+  ' omarchy-detach "$pid_file" "$log_file" "$@"
+  for _ in {1..50}; do
+    [[ -s "$pid_file" ]] && return 0
+    sleep 0.02
+  done
+  echo "Failed to detach: $*" >&2
+  return 1
+}
+
+if pid_is_live "$state_dir/proot.pid" "$container"; then
+  echo "Omarchy is already running."
+  "$script_dir/omarchy-android-status"
+  exit 0
+fi
+
+# Clean up an interrupted partial stack but preserve a healthy X server.
+"$script_dir/omarchy-android-stop" --keep-x >/dev/null 2>&1 || true
+
+# Auto starts with Termux:X11's current native Android surface. After the app
+# is attached, the long edge is capped without changing aspect ratio so dense
+# phone/tablet panels do not impose needless compositor work. An explicit WxH
+# remains exact and Termux:X11 swaps it automatically when orientation changes.
+display_resolution="${OMARCHY_DISPLAY_RESOLUTION:-auto}"
+if [[ "$display_resolution" != auto && ! "$display_resolution" =~ ^[0-9]+x[0-9]+$ ]]; then
+  echo "Invalid OMARCHY_DISPLAY_RESOLUTION: $display_resolution (expected auto or WxH)" >&2
+  exit 1
+fi
+
+resolution_preferences=("displayResolutionMode:native")
+if [[ "$display_resolution" != auto ]]; then
+  resolution_preferences=(
+    "displayResolutionMode:custom"
+    "displayResolutionCustom:$display_resolution"
+  )
+fi
+
+# Android IME text commits made Enter appear as a printable character.  Route
+# keyboard input as key events/scancodes so Enter, Ctrl, Alt, and shortcuts work.
+termux-x11-preference \
+  "enforceCharBasedInput:false" \
+  "preferScancodes:true" \
+  "hardwareKbdScancodesWorkaround:false" \
+  "touchMode:1" \
+  "scaleTouchpad:true" \
+  "tapToMove:false" \
+  "showAdditionalKbd:false" \
+  "additionalKbdVisible:false" \
+  "adjustHeightForEK:false" \
+  "ekbarPosition:bottom" \
+  "ekbarPositionIgnoreOrientation:false" \
+  "extra_keys_config:[['ESC','TAB','CTRL','ALT','META','SHIFT','ENTER','BACKSPACE'],['KEYBOARD','HOME','LEFT','DOWN','UP','RIGHT','END','PREFERENCES']]" \
+  "forceOrientation:auto" \
+  "fullscreen:true" \
+  "adjustResolution:true" \
+  "${resolution_preferences[@]}" \
+  "displayStretch:false" >/dev/null
+
+termux-wake-lock >/dev/null 2>&1 || true
+
+if ! DISPLAY="$display_number" xwininfo -root >/dev/null 2>&1; then
+  rm -f "$termux_prefix/tmp/.X1-lock" "$termux_prefix/tmp/.X11-unix/X1"
+  # Current Termux:X11 shared-buffer fixes allow the AHardwareBuffer path on
+  # this device, avoiding a full CPU-side copy of every 1920x1200 frame.
+  launch_detached "$state_dir/x11.pid" "$state_dir/x11.log" \
+    termux-x11 "$display_number" -ac
+
+  # Bring the Android display surface forward. This is intentionally allowed
+  # to fail when the activity is already visible.
+  am start -n com.termux.x11/com.termux.x11.MainActivity \
+    >>"$state_dir/x11-activity.log" 2>&1 || true
+
+  for _ in {1..80}; do
+    DISPLAY="$display_number" xwininfo -root >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+fi
+
+if ! DISPLAY="$display_number" xwininfo -root >/dev/null 2>&1; then
+  echo "Termux:X11 did not become ready; see $state_dir/x11.log" >&2
+  exit 1
+fi
+
+# Android already reports physical-key repeats. If the outer X server repeats
+# them again, a normal tap can reach Weston as several release/press cycles.
+# Disable only that outer repeat layer; Hyprland still advertises its own sane
+# repeat timing to Wayland applications such as Foot.
+if [[ -x "$script_dir/omarchy-x11-keyboard" ]]; then
+  DISPLAY="$display_number" "$script_dir/omarchy-x11-keyboard" off >/dev/null
+fi
+
+# The X server first exposes its fallback size, then resizes when the Android
+# surface attaches. Wait for a stable geometry so a cold start cannot capture
+# that temporary size and produce an off-center desktop.
+read_stable_geometry() {
+  local last_geometry="" stable_samples=0 sample=""
+  geometry=""
+  for _ in {1..100}; do
+    sample="$(DISPLAY="$display_number" xwininfo -root 2>/dev/null |
+      awk '/Width:/{w=$2} /Height:/{h=$2} END{if (w && h) print w, h}')"
+    if [[ -n "$sample" && "$sample" == "$last_geometry" ]]; then
+      stable_samples=$((stable_samples + 1))
+    else
+      stable_samples=0
+      last_geometry="$sample"
+    fi
+    geometry="$sample"
+    (( stable_samples >= 10 )) && return 0
+    sleep 0.1
+  done
+}
+
+read_stable_geometry
+read -r width height <<< "$geometry"
+if [[ ! "$width" =~ ^[0-9]+$ || ! "$height" =~ ^[0-9]+$ ]]; then
+  width=1280
+  height=800
+fi
+
+if [[ "$display_resolution" == auto ]]; then
+  auto_long_edge="${OMARCHY_AUTO_LONG_EDGE:-1920}"
+  if [[ ! "$auto_long_edge" =~ ^[0-9]+$ ]] || (( auto_long_edge < 1280 || auto_long_edge > 3840 )); then
+    echo "OMARCHY_AUTO_LONG_EDGE must be between 1280 and 3840." >&2
+    exit 1
+  fi
+  target_width="$width"
+  target_height="$height"
+  if (( width >= height && width > auto_long_edge )); then
+    target_width="$auto_long_edge"
+    target_height=$(( (height * auto_long_edge + width / 2) / width ))
+    target_height=$(( target_height / 2 * 2 ))
+  elif (( height > width && height > auto_long_edge )); then
+    target_height="$auto_long_edge"
+    target_width=$(( (width * auto_long_edge + height / 2) / height ))
+    target_width=$(( target_width / 2 * 2 ))
+  fi
+
+  if (( target_width != width || target_height != height )); then
+    display_resolution="${target_width}x${target_height}"
+    termux-x11-preference \
+      "adjustResolution:true" \
+      "displayResolutionMode:custom" \
+      "displayResolutionCustom:$display_resolution" \
+      "displayStretch:false" >/dev/null
+    read_stable_geometry
+    read -r width height <<< "$geometry"
+  else
+    display_resolution="${width}x${height}"
+  fi
+fi
+printf '%s\n' "$display_resolution" > "$state_dir/display-resolution"
+printf '%sx%s\n' "$width" "$height" > "$state_dir/geometry"
+
+rm -f \
+  "$runtime/wayland-omarchy" "$runtime/wayland-omarchy.lock" \
+  "$runtime/wayland-1" "$runtime/wayland-1.lock" \
+  "$runtime/.virgl-omarchy"
+
+weston_gpu_env=()
+weston_renderer=gl
+if [[ "$gpu_mode" == kgsl ]]; then
+  turnip_icd="$termux_prefix/share/vulkan/icd.d/freedreno_icd.aarch64.json"
+  if [[ ! -f "$turnip_icd" ]]; then
+    turnip_icd="$(find "$termux_prefix/share/vulkan/icd.d" -maxdepth 1 -type f -name '*freedreno*.json' -print -quit 2>/dev/null || true)"
+  fi
+  if [[ -z "$turnip_icd" ]]; then
+    echo "Turnip Vulkan ICD not found." >&2
+    exit 1
+  fi
+  weston_gpu_env=(
+    MESA_LOADER_DRIVER_OVERRIDE=zink
+    GALLIUM_DRIVER=zink
+    VK_ICD_FILENAMES="$turnip_icd"
+  )
+else
+  # The compatibility mode must also work on non-Adreno phones. Avoid the
+  # Freedreno-only host renderer; Weston presents the VirGL guest with pixman.
+  weston_renderer=pixman
+fi
+
+launch_detached "$state_dir/weston.pid" "$state_dir/weston-launch.log" env \
+  DISPLAY="$display_number" \
+  XDG_RUNTIME_DIR="$runtime" \
+  "${weston_gpu_env[@]}" \
+  WESTON_X11_REFRESH_MHZ="$refresh_mhz" \
+  "${weston_module_env[@]}" \
+  weston -B x11 --renderer="$weston_renderer" --shell=kiosk \
+    --socket=wayland-omarchy \
+    --width="$width" --height="$height" --scale=1 --idle-time=0 \
+    --log="$state_dir/weston.log"
+
+for _ in {1..100}; do
+  [[ -S "$runtime/wayland-omarchy" ]] && break
+  sleep 0.1
+done
+if [[ ! -S "$runtime/wayland-omarchy" ]]; then
+  echo "Weston did not become ready; see $state_dir/weston.log" >&2
+  "$script_dir/omarchy-android-stop" --keep-x >/dev/null 2>&1 || true
+  exit 1
+fi
+
+if [[ "$gpu_mode" == "virgl" ]]; then
+  launch_detached "$state_dir/virgl.pid" "$state_dir/virgl.log" \
+    virgl_test_server_android --no-fork --multi-clients --angle-vulkan \
+    --socket-path "$runtime/.virgl-omarchy"
+
+  for _ in {1..100}; do
+    [[ -S "$runtime/.virgl-omarchy" ]] && break
+    sleep 0.1
+  done
+  if [[ ! -S "$runtime/.virgl-omarchy" ]]; then
+    echo "VirGL did not become ready; see $state_dir/virgl.log" >&2
+    "$script_dir/omarchy-android-stop" --keep-x >/dev/null 2>&1 || true
+    exit 1
+  fi
+else
+  rm -f "$state_dir/virgl.pid"
+fi
+printf '%s\n' "$gpu_mode" > "$state_dir/gpu-mode"
+
+# When Android still enforces its phantom-process ceiling, start the no-fork
+# native guard immediately before the guest tree. With the developer override
+# active, impose no replacement ceiling and avoid the guard's polling cost.
+if (( unlimited_processes == 0 )); then
+  launch_detached "$state_dir/guard.pid" "$state_dir/guard-launch.log" \
+    "$script_dir/omarchy-process-guard" "$task_uid" "$process_limit" "$state_dir" "$state_dir/guard.log" "$container"
+fi
+
+guest_bind_args=(--bind "$pci_devices_stub:/proc/bus/pci/devices")
+case "$share_mode" in
+  none) ;;
+  termux)
+    guest_bind_args+=(--bind "$HOME:/home/omarchy/Host/Termux")
+    ;;
+  storage)
+    guest_bind_args+=(--bind "/storage/emulated/0:/home/omarchy/Host/Phone")
+    ;;
+  both)
+    guest_bind_args+=(--bind "$HOME:/home/omarchy/Host/Termux")
+    guest_bind_args+=(--bind "/storage/emulated/0:/home/omarchy/Host/Phone")
+    ;;
+  *)
+    echo "Unsupported OMARCHY_SHARE=$share_mode (use none, termux, storage, or both)." >&2
+    exit 1
+    ;;
+esac
+
+launch_detached "$state_dir/proot.pid" "$state_dir/hyprland.log" \
+  proot-distro login --isolated \
+  --bind "$runtime:/run/user/1000" \
+  "${guest_bind_args[@]}" \
+  --user omarchy \
+  -e XDG_RUNTIME_DIR=/run/user/1000 \
+  -e WAYLAND_DISPLAY=wayland-omarchy \
+  -e XDG_SESSION_TYPE=wayland \
+  -e XDG_CURRENT_DESKTOP=Hyprland \
+  -e XDG_SESSION_DESKTOP=Hyprland \
+  -e LANG=C.UTF-8 \
+  -e LC_ALL=C.UTF-8 \
+  -e OMARCHY_PROOT=1 \
+  -e OMARCHY_GPU_MODE="$gpu_mode" \
+  -e OMARCHY_UNLIMITED_PROCS="$unlimited_processes" \
+  -e OMARCHY_OUTPUT_WIDTH="$width" \
+  -e OMARCHY_OUTPUT_HEIGHT="$height" \
+  -e OMARCHY_REFRESH_MHZ="$refresh_mhz" \
+  -e OMARCHY_SCALE="$ui_scale" \
+  -e OMARCHY_KEYBOARD_LAYOUT="$keyboard_layout" \
+  -e NO_AT_BRIDGE=1 \
+  -e QT_ACCESSIBILITY=0 \
+  -e GTK_A11Y=none \
+  -e XWAYLAND_NO_GLAMOR=1 \
+  "${guest_audio_env[@]}" \
+  "${guest_gpu_env[@]}" \
+  -e AQ_NO_KMS_REQUIREMENT=1 \
+  -e AQ_ANDROID_DMABUF_HEAP="$android_dmabuf_heap" \
+  -e AQ_ANDROID_DMABUF_GLFINISH="$android_dmabuf_glfinish" \
+  -e AQ_ANDROID_DMABUF_VULKAN="$android_dmabuf_vulkan" \
+  -e AQ_WAYLAND_REFRESH_MHZ="$refresh_mhz" \
+  -e HYPRLAND_ANDROID_DMABUF="$hyprland_android_dmabuf" \
+  -e HYPRLAND_SHM_GLFINISH="$hyprland_shm_glfinish" \
+  -e HYPRLAND_SHM_DAMAGE="$hyprland_shm_damage" \
+  -e HYPRLAND_SHM_PROFILE="$hyprland_shm_profile" \
+  -e HYPRLAND_GL_DMABUF_EXPORT="$hyprland_gl_dmabuf_export" \
+  -e AQ_NO_MODIFIERS=1 \
+  -e HYPRLAND_EGL_NO_MODIFIERS=1 \
+  -e HYPRLAND_EGL_SURFACELESS=1 \
+  -e HYPRLAND_NO_SD_NOTIFY=1 \
+  -e HYPRLAND_NO_SD_VARS=1 \
+  -e HYPRLAND_NO_RT=1 \
+  -e QT_QPA_PLATFORM=wayland \
+  -e GDK_BACKEND=wayland \
+  -e SDL_VIDEODRIVER=wayland \
+  -e OMARCHY_PATH=/usr/share/omarchy \
+  -e PATH="$hyprland_stage/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  -e XDG_DATA_DIRS="$hyprland_stage/share:/usr/local/share:/usr/share" \
+  "$container" -- \
+  dbus-run-session \
+  --config-file=/home/omarchy/.config/omarchy/proot-session-bus.conf \
+  bash --noprofile --norc -lc \
+    "exec $hyprland_stage/bin/Hyprland --config /home/omarchy/.config/hypr/hyprland.lua"
+
+# The PID file is written by a tiny detached Bash wrapper immediately before
+# it execs proot-distro. Do not mistake that sub-millisecond exec window for a
+# failed PRoot launch.
+for _ in {1..100}; do
+  pid_is_live "$state_dir/proot.pid" "$container" && break
+  sleep 0.02
+done
+if ! pid_is_live "$state_dir/proot.pid" "$container"; then
+  echo "The detached PRoot launcher did not exec; see $state_dir/hyprland.log" >&2
+  exit 1
+fi
+
+proot_missing_samples=0
+for _ in {1..300}; do
+  if find "$runtime/hypr" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null | grep -q .; then
+    break
+  fi
+  if ! pid_is_live "$state_dir/proot.pid" "$container"; then
+    # PRoot briefly exposes an empty cmdline while exec transitions are being
+    # traced. Require a sustained miss instead of treating one sample as death.
+    proot_missing_samples=$((proot_missing_samples + 1))
+    if (( proot_missing_samples >= 10 )); then
+      echo "Hyprland exited during startup; see $state_dir/hyprland.log" >&2
+      exit 1
+    fi
+  else
+    proot_missing_samples=0
+  fi
+  sleep 0.1
+done
+
+# Keep watching the native Termux child count. With Android's restriction
+# enabled this prevents random phantom-process reaping; with it disabled the
+# same guard is only a high fork-bomb backstop.
+count_uid_processes() {
+  local status_file key real_uid ignored process_state
+  uid_processes=0
+  for status_file in /proc/[0-9]*/status; do
+    [[ -r "$status_file" ]] || continue
+    process_state=""
+    while read -r key real_uid ignored; do
+      if [[ "$key" == "State:" ]]; then
+        process_state="$real_uid"
+        continue
+      fi
+      if [[ "$key" == "Uid:" ]]; then
+        [[ "$real_uid" == "$task_uid" && "$process_state" != "Z" ]] && uid_processes=$((uid_processes + 1))
+        break
+      fi
+    done < "$status_file" 2>/dev/null || true
+  done
+}
+
+shell_seen=false
+for _ in {1..100}; do
+  count_uid_processes
+  if (( unlimited_processes == 0 && uid_processes >= process_limit )); then
+    echo "Safety guard stopped Omarchy at $uid_processes Termux processes (limit: $((process_limit - 1)))." >&2
+    for pid_file in "$state_dir/proot.pid" "$state_dir/virgl.pid" "$state_dir/weston.pid"; do
+      if [[ -r "$pid_file" ]]; then
+        read -r pid < "$pid_file"
+        [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM -- "-$pid" 2>/dev/null || true
+      fi
+    done
+    exit 1
+  fi
+
+  for cmdline_file in /proc/[0-9]*/cmdline; do
+    [[ -r "$cmdline_file" ]] || continue
+    while IFS= read -r -d '' argument; do
+      if [[ "$argument" == "quickshell" ]]; then
+        shell_seen=true
+        break 2
+      fi
+    done < "$cmdline_file" 2>/dev/null || true
+  done
+  sleep 0.1
+done
+
+if ! $shell_seen; then
+  echo "Omarchy compositor started, but Quickshell did not; see $state_dir/hyprland.log" >&2
+  exit 1
+fi
+
+sleep 1
+count_uid_processes
+final_stack_live=false
+for _ in {1..20}; do
+  if pid_is_live "$state_dir/proot.pid" "$container" &&
+     { (( unlimited_processes == 1 )) || pid_is_live "$state_dir/guard.pid" "omarchy-process-guard"; }; then
+    final_stack_live=true
+    break
+  fi
+  sleep 0.1
+done
+if ! $final_stack_live; then
+  echo "Omarchy was stopped during its final startup check; see $state_dir/guard.log and $state_dir/hyprland.log" >&2
+  exit 1
+fi
+echo "Omarchy started fullscreen at ${width}x${height}."
+if (( unlimited_processes == 1 )); then
+  echo "Android child-process restriction: disabled (no synthetic process ceiling)."
+else
+  echo "Termux process safety: ${uid_processes}/$((process_limit - 1)) used."
+fi
+"$script_dir/omarchy-android-status"

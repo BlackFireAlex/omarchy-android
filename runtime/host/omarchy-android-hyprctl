@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+termux_prefix="${PREFIX:-/data/data/com.termux/files/usr}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+config_file="${OMARCHY_ANDROID_CONFIG:-$script_dir/../config/runtime.conf}"
+if [[ -r "$config_file" ]]; then
+  # shellcheck source=/dev/null
+  source "$config_file"
+fi
+runtime="${OMARCHY_RUNTIME_DIR:-/data/data/com.termux/r}"
+container="${OMARCHY_CONTAINER:-omarchy-android}"
+aquamarine_stage="${OMARCHY_AQUAMARINE_STAGE:-/opt/omarchy-android/aquamarine}"
+hyprland_stage="${OMARCHY_HYPRLAND_STAGE:-/opt/omarchy-android/hyprland}"
+signature_dir="$(find "$runtime/hypr" -mindepth 1 -maxdepth 1 -type d \
+  -printf '%T@ %p\n' 2>/dev/null | sort -nr | sed -n '1s/^[^ ]* //p')"
+
+if [[ -z "$signature_dir" ]]; then
+  echo "Hyprland is not running." >&2
+  exit 1
+fi
+
+signature="${signature_dir##*/}"
+exec proot-distro login --isolated \
+  --bind "$runtime:/run/user/1000" \
+  --user omarchy \
+  -e XDG_RUNTIME_DIR=/run/user/1000 \
+  -e HYPRLAND_INSTANCE_SIGNATURE="$signature" \
+  -e LD_LIBRARY_PATH="$aquamarine_stage/lib" \
+  -e PATH="$hyprland_stage/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  "$container" -- \
+  "$hyprland_stage/bin/hyprctl" "$@"

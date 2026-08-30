@@ -1,0 +1,57 @@
+name: Bug report
+description: Report an installation or runtime problem
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach credentials, browser profiles, complete home directories, or unreviewed diagnostic archives.
+
+  - type: input
+    id: release
+    attributes:
+      label: Release
+      placeholder: v0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device and Android version
+      placeholder: Device model, Android version, and ARM64 SoC
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and selected graphics mode
+      placeholder: Adreno model; auto, kgsl, or software
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include concise reproduction steps and the expected result.
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Paste install.sh doctor and omarchy-android status output after removing private data.
+      render: shell
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed credentials, identifiers, personal paths, and private data.
+          required: true

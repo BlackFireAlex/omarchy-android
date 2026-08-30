@@ -1,0 +1,289 @@
+From adda307df31e19e3a766f6665776d315bbc33fc2 Mon Sep 17 00:00:00 2001
+From: BlackFireAlex <8484750+BlackFireAlex@users.noreply.github.com>
+Date: Sat, 29 Aug 2026 19:35:08 -0700
+Subject: [PATCH] shell: carry proven PRoot launcher optimizations
+
+---
+ shell/plugins/menu/BarWidget.qml | 10 +++++-
+ shell/plugins/menu/Menu.qml      | 59 +++++++++++++++++++++++++-------
+ shell/services/AppLibrary.qml    | 32 ++++++++++++++---
+ shell/shell.qml                  | 16 +++++++--
+ 4 files changed, 97 insertions(+), 20 deletions(-)
+
+diff --git a/shell/plugins/menu/BarWidget.qml b/shell/plugins/menu/BarWidget.qml
+index 8fa7e1b3..86df62a5 100644
+--- a/shell/plugins/menu/BarWidget.qml
++++ b/shell/plugins/menu/BarWidget.qml
+@@ -18,7 +18,15 @@ BarWidget {
+     onPressed: function(button) {
+       if (!root.bar) return
+       if (button === Qt.RightButton) root.bar.run("xdg-terminal-exec")
+-      else root.bar.run("omarchy-shell shell toggle omarchy.menu '{\"menu\":\"root\"}'")
++      // This widget and the menu live in the same Quickshell process. Routing
++      // a click through bash -> timeout -> qs IPC -> this same process is
++      // especially expensive under PRoot and makes this button feel much
++      // slower than the other in-process bar popups. Keep IPC only as a
++      // compatibility fallback for a nonstandard bar host.
++      else if (root.bar.shell && typeof root.bar.shell.toggle === "function")
++        root.bar.shell.toggle("omarchy.menu", '{"menu":"root"}')
++      else
++        root.bar.run("omarchy-shell shell toggle omarchy.menu '{\"menu\":\"root\"}'")
+     }
+   }
+ }
+diff --git a/shell/plugins/menu/Menu.qml b/shell/plugins/menu/Menu.qml
+index aa879c18..cdd7d64c 100644
+--- a/shell/plugins/menu/Menu.qml
++++ b/shell/plugins/menu/Menu.qml
+@@ -786,6 +786,22 @@ Item {
+     }
+   }
+ 
++  // Handle activation at the panel-window level as well as the focused item.
++  // Nested compositors can briefly move QML item focus while the layer-shell
++  // surface still owns keyboard focus; a window shortcut keeps Return reliable
++  // in that interval without changing normal text input.
++  function activateCurrent(source) {
++    if (root.dmenuActive) {
++      if (root.mode === "input") root.applyDmenuSelection(root.filterText)
++      else if (displayModel.count > 0)
++        root.activateIndex(root.cursorActive ? root.selectedIndex : 0)
++    } else if (root.cursorActive) {
++      root.activateIndex(root.selectedIndex)
++    } else {
++      root.settleCursor()
++    }
++  }
++
+   function requestDeleteSelected() {
+     if (!root.cursorActive || root.selectedIndex < 0 || root.selectedIndex >= displayModel.count) return
+     var row = displayModel.get(root.selectedIndex)
+@@ -846,7 +862,10 @@ Item {
+     selectedIndex = 0
+     cursorActive = true
+     root.disarmPointer()
+-    root.evaluateGuards()
++    // Guard state is populated when the watched menu sources load. Rebuilding
++    // and launching the 172-condition package/hardware audit on every open
++    // competes with the panel's close animation under PRoot. Re-evaluation is
++    // still triggered by menu source reloads and an explicit menu refresh.
+     opened = true
+     rebuildDisplay()
+     invalidateVolatileProvider(activeMenu)
+@@ -994,6 +1013,17 @@ Item {
+   property bool guardsPending: false
+ 
+   function evaluateGuards() {
++    // The full package/provides inventory forks pacman, awk, and a login shell.
++    // In PRoot keep the real menu surface and actions, but leave conditional
++    // rows permissive instead of spending Android's native-process allowance.
++    if (Quickshell.env("OMARCHY_PROOT") === "1"
++        && Quickshell.env("OMARCHY_UNLIMITED_PROCS") !== "1") {
++      root.guardsPending = false
++      root.whenResults = ({})
++      root.checkedResults = ({})
++      root.disabledResults = ({})
++      return
++    }
+     // Process ignores a command change while it is running, and `collected`
+     // belongs to the run in flight, so a second evaluation cannot overwrite
+     // the first: it would throw away the lines already read and never start.
+@@ -1072,6 +1102,20 @@ Item {
+     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+     exclusionMode: ExclusionMode.Ignore
+ 
++    Shortcut {
++      sequence: "Return"
++      context: Qt.ApplicationShortcut
++      enabled: root.opened && !root.deleteConfirmOpen
++      onActivated: root.activateCurrent("return-shortcut")
++    }
++
++    Shortcut {
++      sequence: "Enter"
++      context: Qt.ApplicationShortcut
++      enabled: root.opened && !root.deleteConfirmOpen
++      onActivated: root.activateCurrent("enter-shortcut")
++    }
++
+     // The card opens centered exactly as always. The first search keystroke
+     // or submenu move freezes the top line where it currently sits — from
+     // then on the card grows and shrinks downward instead of re-centering
+@@ -1152,11 +1196,7 @@ Item {
+             root.select(6)
+             event.accepted = true
+           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Right) {
+-            if (root.dmenuActive) {
+-              if (root.mode === "input") root.applyDmenuSelection(root.filterText)
+-              else if (displayModel.count > 0) root.activateIndex(root.cursorActive ? root.selectedIndex : 0)
+-            } else if (root.cursorActive) root.activateIndex(root.selectedIndex)
+-            else root.settleCursor()
++            root.activateCurrent(event.key === Qt.Key_Right ? "right-key" : "focused-key")
+             event.accepted = true
+           } else if (event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127 && (event.modifiers === Qt.NoModifier || event.modifiers === Qt.ShiftModifier)) {
+             root.setFilter(root.filterText + event.text)
+@@ -1199,7 +1239,6 @@ Item {
+           color: "transparent"
+ 
+           Text {
+-            textFormat: Text.PlainText
+             anchors.left: parent.left
+             anchors.right: parent.right
+             anchors.verticalCenter: parent.verticalCenter
+@@ -1288,7 +1327,6 @@ Item {
+ 
+               Text {
+                 id: iconText
+-                textFormat: Text.PlainText
+                 visible: row.hasIcon && !row.isApp
+                 text: row.icon
+                 color: row.hasCursor ? root.selectedText : root.foreground
+@@ -1330,7 +1368,6 @@ Item {
+ 
+                 Text {
+                   id: labelText
+-                  textFormat: Text.PlainText
+                   width: parent.width
+                   text: row.label
+                   color: row.hasCursor ? root.selectedText : root.foreground
+@@ -1341,7 +1378,6 @@ Item {
+                 }
+ 
+                 Text {
+-                  textFormat: Text.PlainText
+                   width: parent.width
+                   text: row.detail
+                   visible: (root.filterText || row.kind === "dmenu") && row.detail.length > 0
+@@ -1362,7 +1398,6 @@ Item {
+                 spacing: 0
+ 
+                 Text {
+-                  textFormat: Text.PlainText
+                   visible: false
+                   text: row.childCount
+                   color: root.foreground
+@@ -1373,7 +1408,6 @@ Item {
+                 }
+ 
+                 Text {
+-                  textFormat: Text.PlainText
+                   text: row.kind === "menu" || row.kind === "link" ? "›" : ""
+                   color: row.hasCursor ? root.selectedText : root.foreground
+                   opacity: row.kind === "menu" || row.kind === "link" ? 0.36 : 0
+@@ -1458,7 +1492,6 @@ Item {
+             }
+ 
+             Text {
+-              textFormat: Text.PlainText
+               text: root.filterText ? "No matches for “" + root.filterText + "”" : "Nothing here yet"
+               color: root.foreground
+               opacity: 0.7
+diff --git a/shell/services/AppLibrary.qml b/shell/services/AppLibrary.qml
+index 738529de..12ba94aa 100644
+--- a/shell/services/AppLibrary.qml
++++ b/shell/services/AppLibrary.qml
+@@ -12,6 +12,9 @@ Item {
+   id: root
+ 
+   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
++  readonly property bool isProot: Quickshell.env("OMARCHY_PROOT") === "1"
++  readonly property bool prootMode: Quickshell.env("OMARCHY_PROOT") === "1"
++                                  && Quickshell.env("OMARCHY_UNLIMITED_PROCS") !== "1"
+ 
+   property var configuredHiddenEntryIds: ({})
+   property var desktopHiddenEntryIds: ({})
+@@ -71,6 +74,10 @@ Item {
+   // The shell may start before first-install packages have finished placing
+   // their icons; consumers call this when they open so icons appear live.
+   function refreshIcons() {
++    // The fallback index traverses more than 32,000 icon files in this image.
++    // Qt's themed lookup and the startup/file-change scans already populate
++    // icons, so never repeat that traversal on every menu open under PRoot.
++    if (root.isProot) return
+     if (!iconIndexScan.running) iconIndexScan.running = true
+   }
+ 
+@@ -78,6 +85,16 @@ Item {
+     var id = String(desktopId || "")
+     if (!id) return
+     root.beginLaunchFeedback(name)
++    if (root.isProot) {
++      // Quickshell already has the complete Wayland session environment.
++      // Bypass UWSM/systemd activation, which cannot exist in PRoot, and send
++      // Chromium through the launcher that supplies its required sandbox flags.
++      if (id === "chromium")
++        Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-launch-browser"])
++      else
++        Quickshell.execDetached(["gtk-launch", id + ".desktop"])
++      return
++    }
+     // Start gtk-launch inside a scope under app-graphical.slice so apps do not
+     // inherit wayland-wm@.service. Keeping gtk-launch as the desktop-entry
+     // resolver supports IDs with spaces and entries that UWSM rejects.
+@@ -255,14 +272,21 @@ Item {
+   Connections {
+     target: DesktopEntries.applications
+     function onValuesChanged() {
+-      hiddenEntryScan.running = true
+-      iconIndexDebounce.restart()
++      if (!root.prootMode) {
++        hiddenEntryScan.running = true
++        iconIndexDebounce.restart()
++      }
+       root.appsChanged()
+     }
+   }
+ 
+   Component.onCompleted: {
+-    hiddenEntryScan.running = true
+-    iconIndexScan.running = true
++    // The fallback scans fork Bash and find processes. Android counts every
++    // PRoot child against Termux's small native-process allowance, while Qt's
++    // normal themed lookup and DesktopEntries already provide the core data.
++    if (!root.prootMode) {
++      hiddenEntryScan.running = true
++      iconIndexScan.running = true
++    }
+   }
+ }
+diff --git a/shell/shell.qml b/shell/shell.qml
+index 71a9834f..c8a1ed31 100644
+--- a/shell/shell.qml
++++ b/shell/shell.qml
+@@ -1,6 +1,7 @@
+ import QtQuick
+ import QtQml.Models
+ import Quickshell
++import Quickshell.Hyprland
+ import Quickshell.Io
+ 
+ import qs.Commons
+@@ -11,6 +12,17 @@ import "services"
+ ShellRoot {
+   id: shell
+ 
++  // Hyprland can invoke this object through its `global` dispatcher without
++  // forking bash, jq, timeout, or a second qs IPC client. This gives the
++  // keyboard launcher the same in-process path as the bar's corner button.
++  GlobalShortcut {
++    appid: "omarchy"
++    name: "menu"
++    description: "Toggle the Omarchy root menu"
++    triggerDescription: "Super+Space"
++    onPressed: shell.toggle("omarchy.menu", '{"menu":"root"}')
++  }
++
+   // Shared service instances. Plugins receive these via property injection
+   // rather than re-importing them as singletons — relative-path imports do
+   // not share singleton state, which silently leaves consumers with their
+@@ -149,8 +161,8 @@ ShellRoot {
+     pluginRegistry.shellConfigProvider = function() { return shell.shellConfig }
+     pluginRegistry.shellConfigMutator = function(mutate) { shell.mutateShellConfig(mutate) }
+     // PluginRegistry.ensureUserDir() runs in its own Component.onCompleted and
+-    // chains rescan() once the directory exists. We also kick a scan here in
+-    // case the user dir already existed at startup.
++    // chains rescan() once the directory exists. If that completion happened
++    // before firstPartyDir was assigned, this call performs the real scan now.
+     pluginRegistry.rescan()
+     shell._syncServices()
+   }

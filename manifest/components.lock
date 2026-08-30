@@ -1,0 +1,9 @@
+# name|type|upstream|revision|license
+omarchy|git|https://github.com/basecamp/omarchy.git|158e8cfb3a03f7b390e4213eaf15edcea0dfaa98|MIT
+omarchy-pkgs|git|https://github.com/omacom-io/omarchy-pkgs.git|cf39173553ac777a0b35188195f6b5e6bb4e2f1b|MIT
+hyprland|git|https://github.com/hyprwm/Hyprland.git|5c9377c15f85c50648f35ca5a213754f95b93ca0|BSD-3-Clause
+aquamarine|git|https://github.com/hyprwm/aquamarine.git|a79fb21b2e2a82dd061a6d071802bcf38bd5c383|BSD-3-Clause
+weston|git|https://gitlab.freedesktop.org/wayland/weston.git|015b3b4d4c05da44a22349ea6e651d1a8f678c59|MIT
+termux-x11|git|https://github.com/termux/termux-x11.git|6d3c6883265b4ec8092673e6d2d61ef86cab5405|MIT
+mesa|git|https://github.com/lfdevs/mesa-for-android-container.git|98f3d6229d61452cef80f8563af7c56ae599dc14|MIT AND BSD-3-Clause AND SGI-B-2.0
+archlinuxarm-rootfs|archive|https://hub.docker.com/r/danhunsaker/archlinuxarm|20260517-layer-sha256-a2920b02b16de310b39f36ff28ffdfa1912bd6ea904fa7f95bd96087003eb0d7|mixed

@@ -1,0 +1,1450 @@
+From ad12324395bac87325edd758eb4f1249bd06608c Mon Sep 17 00:00:00 2001
+From: BlackFireAlex <8484750+BlackFireAlex@users.noreply.github.com>
+Date: Sat, 29 Aug 2026 19:41:01 -0700
+Subject: [PATCH] runtime: carry proven Android PRoot compatibility fixes
+
+---
+ bin/omarchy-audio-input-mute                 |  4 +
+ bin/omarchy-audio-input-set-default          |  5 +
+ bin/omarchy-audio-output-set-default         |  6 ++
+ bin/omarchy-audio-output-volume              |  4 +
+ bin/omarchy-launch-browser                   | 24 +++++
+ bin/omarchy-launch-shell                     | 69 +++++++++++++-
+ bin/omarchy-launch-terminal                  |  7 ++
+ bin/omarchy-launch-webapp                    | 12 +++
+ bin/omarchy-menu-keybindings                 | 83 ++++++++++++++---
+ bin/omarchy-restart-audio                    | 10 ++
+ bin/omarchy-shell                            |  9 +-
+ bin/omarchy-theme-color                      |  5 +-
+ bin/omarchy-theme-set-templates              | 19 +++-
+ default/bash/init                            |  6 +-
+ default/hypr/autostart.lua                   | 10 ++
+ shell/plugins/agents/Main.qml                | 10 +-
+ shell/plugins/bar/widgets/KeyboardLayout.qml |  4 +-
+ shell/plugins/bar/widgets/SystemUpdate.qml   |  4 +-
+ shell/plugins/clipboard/Clipboard.qml        | 11 ++-
+ shell/plugins/lock/Service.qml               | 20 +++-
+ shell/plugins/panels/audio/Panel.qml         | 98 +++++++++++++++-----
+ shell/plugins/panels/monitor/Panel.qml       | 14 ++-
+ shell/plugins/panels/network/Panel.qml       | 24 ++---
+ shell/plugins/panels/weather/Panel.qml       | 19 +---
+ shell/services/PluginRegistry.qml            | 45 ++++++---
+ 25 files changed, 422 insertions(+), 100 deletions(-)
+
+diff --git a/bin/omarchy-audio-input-mute b/bin/omarchy-audio-input-mute
+index 554eae44..f585ab3c 100755
+--- a/bin/omarchy-audio-input-mute
++++ b/bin/omarchy-audio-input-mute
+@@ -2,6 +2,10 @@
+ 
+ # omarchy:summary=Toggle microphone mute. Drives the hardware mic-mute LED on laptops that expose one.
+ 
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  exit 0
++fi
++
+ wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle >/dev/null
+ 
+ if wpctl get-volume @DEFAULT_AUDIO_SOURCE@ | grep -q MUTED; then
+diff --git a/bin/omarchy-audio-input-set-default b/bin/omarchy-audio-input-set-default
+index 280042d2..69c21680 100755
+--- a/bin/omarchy-audio-input-set-default
++++ b/bin/omarchy-audio-input-set-default
+@@ -12,6 +12,11 @@ if [[ -z $node_id || -z $source_name ]]; then
+   exit 1
+ fi
+ 
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  # Android microphone capture is not exported into this desktop yet.
++  exit 0
++fi
++
+ wpctl set-default "$node_id" 2>/dev/null || true
+ pactl set-default-source "$source_name" 2>/dev/null || true
+ 
+diff --git a/bin/omarchy-audio-output-set-default b/bin/omarchy-audio-output-set-default
+index a742a2b3..d0467073 100755
+--- a/bin/omarchy-audio-output-set-default
++++ b/bin/omarchy-audio-output-set-default
+@@ -12,6 +12,12 @@ if [[ -z $node_id || -z $sink_name ]]; then
+   exit 1
+ fi
+ 
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  export PULSE_SERVER=tcp:127.0.0.1:4715
++  timeout 2 pactl set-default-sink AAudio_sink 2>/dev/null || true
++  exit 0
++fi
++
+ timeout 2 wpctl set-default "$node_id" 2>/dev/null || true
+ timeout 2 pactl set-default-sink "$sink_name" 2>/dev/null || true
+ 
+diff --git a/bin/omarchy-audio-output-volume b/bin/omarchy-audio-output-volume
+index 22a24aa5..be138a8e 100755
+--- a/bin/omarchy-audio-output-volume
++++ b/bin/omarchy-audio-output-volume
+@@ -1,5 +1,9 @@
+ #!/bin/bash
+ 
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  export PULSE_SERVER=tcp:127.0.0.1:4715
++fi
++
+ # omarchy:summary=Adjust output volume and show the Omarchy OSD
+ # omarchy:args=<raise|lower|mute-toggle|+N|-N>
+ # omarchy:examples=omarchy audio output volume raise | omarchy audio output volume lower | omarchy audio output volume mute-toggle | omarchy audio output volume +1
+diff --git a/bin/omarchy-launch-browser b/bin/omarchy-launch-browser
+index 044b220d..a7f7b58b 100755
+--- a/bin/omarchy-launch-browser
++++ b/bin/omarchy-launch-browser
+@@ -1,8 +1,32 @@
+ #!/bin/bash
+ 
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  export PULSE_SERVER=tcp:127.0.0.1:4715
++fi
++
+ # omarchy:summary=Launch the default browser as determined by xdg-settings.
+ # omarchy:args=[url]
+ 
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  args=()
++  for argument in "$@"; do
++    if [[ $argument == "--private" ]]; then
++      args+=("--incognito")
++    else
++      args+=("$argument")
++    fi
++  done
++
++  # There is no user systemd/uwsm or usable Chromium namespace sandbox in the
++  # isolated PRoot session. Launch the native ARM64 browser directly, while
++  # otherwise retaining Chromium's normal multi-process architecture.
++  exec chromium \
++    --no-sandbox \
++    --disable-dev-shm-usage \
++    --password-store=basic \
++    "${args[@]}"
++fi
++
+ default_browser=$(env -u BROWSER xdg-settings get default-web-browser)
+ if [[ -z $default_browser ]]; then
+   default_browser=$(xdg-mime query default x-scheme-handler/https)
+diff --git a/bin/omarchy-launch-shell b/bin/omarchy-launch-shell
+index c183eb0b..ff7c1b65 100755
+--- a/bin/omarchy-launch-shell
++++ b/bin/omarchy-launch-shell
+@@ -14,9 +14,74 @@
+ # A package upgrade rewriting $OMARCHY_PATH/shell would otherwise reload it
+ # against a half-written tree, and that failed reload leaves a second engine
+ # generation behind that turns the next restart's IPC kill into a crash.
++prepare_proot_plugin_index() {
++  local output="$XDG_RUNTIME_DIR/omarchy-plugin-scan.txt"
++  local temporary="${output}.new"
++  local manifest sub line
++  local plugin_root="$OMARCHY_PATH/shell/plugins"
++  local -a manifests
++
++  : > "$temporary"
++  shopt -s nullglob
++  manifests=(
++    "$plugin_root"/*/manifest.json
++    "$plugin_root"/*/*/manifest.json
++    "$plugin_root"/*/*/*.manifest.json
++  )
++
++  for manifest in "${manifests[@]}"; do
++    if [[ ${manifest##*/} == manifest.json ]]; then
++      sub=${manifest%/manifest.json}
++    else
++      sub=${manifest%/*}
++    fi
++    printf '===firstparty::%s===\n' "$sub" >> "$temporary"
++    while IFS= read -r line || [[ -n $line ]]; do
++      printf '%s\n' "$line" >> "$temporary"
++    done < "$manifest"
++    printf '\n=== EOM ===\n' >> "$temporary"
++  done
++
++  for sub in "$HOME/.config/omarchy/plugins"/*/; do
++    [[ -f "$sub/manifest.json" ]] || continue
++    printf '===thirdparty::%s===\n' "${sub%/}" >> "$temporary"
++    while IFS= read -r line || [[ -n $line ]]; do
++      printf '%s\n' "$line" >> "$temporary"
++    done < "$sub/manifest.json"
++    printf '\n=== EOM ===\n' >> "$temporary"
++  done
++
++  mv -f -- "$temporary" "$output"
++}
++
++if [[ $(uname -r) == *PRoot* ]]; then
++  export OMARCHY_PROOT=1
++  prepare_proot_plugin_index
++fi
++
+ run_shell() {
+-  QS_DISABLE_FILE_WATCHER=1 QS_NO_RELOAD_POPUP=1 \
+-    systemd-cat -t omarchy-shell -- quickshell -n -p "$OMARCHY_PATH/shell" &
++  if [[ -S /run/systemd/journal/stdout ]]; then
++    QS_DISABLE_FILE_WATCHER=1 QS_NO_RELOAD_POPUP=1 \
++      systemd-cat -t omarchy-shell -- quickshell -n -p "$OMARCHY_PATH/shell" &
++  else
++    # PRoot has no systemd journal. Keep the real Omarchy shell and supervision;
++    # only bypass the journal transport that cannot exist in this environment.
++    if [[ ${OMARCHY_GPU_MODE:-virgl} == kgsl ]]; then
++      # Qt Quick's direct KGSL buffers can become permanently transparent
++      # after the outer Termux:X11 Android surface reconnects. Use Qt's
++      # reliable SHM renderer for the shell only; Hyprland, Weston, and apps
++      # remain GPU accelerated.
++      NO_AT_BRIDGE=1 QT_ACCESSIBILITY=0 QT_QPA_PLATFORMTHEME= \
++        QT_QUICK_BACKEND=software QSG_RENDER_LOOP=basic \
++        QS_DISABLE_FILE_WATCHER=1 QS_NO_RELOAD_POPUP=1 \
++        quickshell -n -p "$OMARCHY_PATH/shell" &
++    else
++      NO_AT_BRIDGE=1 QT_ACCESSIBILITY=0 QT_QPA_PLATFORMTHEME= \
++        QT_QUICK_BACKEND=software QSG_RENDER_LOOP=basic \
++        QS_DISABLE_FILE_WATCHER=1 QS_NO_RELOAD_POPUP=1 \
++        quickshell -n -p "$OMARCHY_PATH/shell" &
++    fi
++  fi
+   shell_pid=$!
+ 
+   local status
+diff --git a/bin/omarchy-launch-terminal b/bin/omarchy-launch-terminal
+index a07a1dde..24c16ede 100755
+--- a/bin/omarchy-launch-terminal
++++ b/bin/omarchy-launch-terminal
+@@ -3,4 +3,11 @@
+ # omarchy:summary=Launch a terminal in the active terminal's current directory
+ # omarchy:args=[command...]
+ 
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  # Avoid the hyprctl/jq current-directory discovery chain in PRoot. Foot can
++  # map immediately and Bash starts in the user's home directory.
++  cd -- "$HOME" || exit 1
++  exec foot "$@"
++fi
++
+ exec setsid uwsm-app -- xdg-terminal-exec --dir="$(omarchy-cmd-terminal-cwd)" "$@"
+diff --git a/bin/omarchy-launch-webapp b/bin/omarchy-launch-webapp
+index 6ee0f84a..cb6677bc 100755
+--- a/bin/omarchy-launch-webapp
++++ b/bin/omarchy-launch-webapp
+@@ -1,8 +1,20 @@
+ #!/bin/bash
+ 
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  export PULSE_SERVER=tcp:127.0.0.1:4715
++fi
++
+ # omarchy:summary=Launch a URL as a web app in the default supported browser
+ # omarchy:args=<url>
+ 
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  exec chromium \
++    --no-sandbox \
++    --disable-dev-shm-usage \
++    --password-store=basic \
++    --app="$1" "${@:2}"
++fi
++
+ browser=$(xdg-settings get default-web-browser)
+ 
+ case $browser in
+diff --git a/bin/omarchy-menu-keybindings b/bin/omarchy-menu-keybindings
+index 767b5dac..ebbbe20c 100755
+--- a/bin/omarchy-menu-keybindings
++++ b/bin/omarchy-menu-keybindings
+@@ -2,6 +2,60 @@
+ 
+ # omarchy:summary=Display Hyprland keybindings defined in your configuration using an interactive search menu.
+ 
++# Some Samsung keyboards emit several Meta-key activations for one physical
++# chord. Serialize PRoot invocations so one chord cannot open multiple menus.
++# If Android's child-process restriction is still enabled, use the cached
++# low-process viewer; otherwise continue into Omarchy's full interactive menu.
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  exec 9>"${XDG_RUNTIME_DIR:-/tmp}/omarchy-menu-keybindings.lock"
++  flock -n 9 || exit 0
++
++  if [[ ${OMARCHY_UNLIMITED_PROCS:-0} != 1 ]]; then
++  shopt -s nullglob
++  cache_files=("${XDG_CACHE_HOME:-$HOME/.cache}/omarchy"/keybindings-*.records)
++  shopt -u nullglob
++
++  labels=()
++  if [[ -f ${cache_files[0]:-} ]]; then
++    while IFS=$'\t' read -r label _; do
++      [[ -n $label ]] && labels+=("$label")
++    done <"${cache_files[0]}"
++  fi
++
++  # Retain a useful emergency set if the cache has not been populated yet.
++  if (( ${#labels[@]} == 0 )); then
++    labels=(
++      "SUPER + K                           → Keybindings"
++      "SUPER + SPACE                       → Omarchy menu"
++      "SUPER + RETURN                      → Terminal"
++      "SUPER SHIFT + RETURN                → Browser"
++      "SUPER SHIFT + F                     → File manager"
++      "SUPER + ESCAPE                      → System menu"
++      "SUPER SHIFT CTRL + SPACE            → Theme menu"
++      "SUPER + F                           → Full screen"
++      "SUPER + Q                           → Close window"
++    )
++  fi
++
++  payload='{"mode":"select","prompt":"Keybindings","options":['
++  separator=
++  for label in "${labels[@]}"; do
++    label=${label//\\/\\\\}
++    label=${label//\"/\\\"}
++    label=${label//$'\n'/\\n}
++    label=${label//$'\r'/\\r}
++    label=${label//$'\t'/\\t}
++    payload+="${separator}\"${label}\""
++    separator=,
++  done
++  payload+='],"width":800,"maxHeight":500}'
++
++  qs ipc -n -p "${OMARCHY_PATH:-/usr/share/omarchy}/shell" call -- shell summon omarchy.menu "$payload"
++  sleep 2
++  exit 0
++  fi
++fi
++
+ # Hyprland's Lua config provider currently reports Lua binds as dispatcher
+ # __lua in `hyprctl binds`. Keep a lightweight source-derived cache so the
+ # menu can still show and dispatch those bindings.
+@@ -69,19 +123,14 @@ parse_keycodes() {
+ # Supplement `hyprctl binds` for Lua-only binds that Hyprland currently
+ # reports as dispatcher __lua and without their original key for code: binds.
+ build_lua_bind_cache() {
+-  local modmask description key dispatcher arg cache_key
++  local modmask description key dispatcher arg cache_key lua_bind_records
+ 
+   omarchy-cmd-present lua || return 0
+ 
+-  while IFS=$'\t' read -r modmask description key dispatcher arg; do
+-    [[ -z $modmask || -z $description || -z $key ]] && continue
+-
+-    LUA_BIND_KEY_MAP["$modmask,$description"]="$key"
+-    cache_key="$modmask,$description,$key"
+-    LUA_BIND_DISPATCHER_MAP["$cache_key"]="$dispatcher"
+-    LUA_BIND_ARG_MAP["$cache_key"]="$arg"
+-  done < <(
+-    lua <<'LUA'
++  # PRoot cannot reliably reopen Bash process-substitution descriptors through
++  # /dev/fd. Capture Lua's small text result first, then parse it from a here
++  # string so dispatcher metadata is not silently discarded.
++  lua_bind_records=$(lua <<'LUA'
+ local modifiers = { SHIFT = 1, CTRL = 4, CONTROL = 4, ALT = 8, SUPER = 64 }
+ 
+ local function split_keys(keys)
+@@ -220,6 +269,9 @@ hl = setmetatable({
+   get_config = function()
+     return nil
+   end,
++  get_active_monitor = function()
++    return nil
++  end,
+ }, {
+   __index = function()
+     return noop
+@@ -238,6 +290,15 @@ if file then
+ end
+ LUA
+   )
++
++  while IFS=$'\t' read -r modmask description key dispatcher arg; do
++    [[ -z $modmask || -z $description || -z $key ]] && continue
++
++    LUA_BIND_KEY_MAP["$modmask,$description"]="$key"
++    cache_key="$modmask,$description,$key"
++    LUA_BIND_DISPATCHER_MAP["$cache_key"]="$dispatcher"
++    LUA_BIND_ARG_MAP["$cache_key"]="$arg"
++  done <<<"$lua_bind_records"
+ }
+ 
+ modmask_to_text() {
+@@ -530,7 +591,7 @@ output_binding_records_uncached() {
+ 
+ keybindings_cache_key() {
+   {
+-    printf 'v13\n'
++    printf 'v14\n'
+     hyprctl devices 2>/dev/null | grep -F 'active keymap:'
+     hyprctl binds 2>/dev/null
+   } | sha256sum | awk '{ print $1 }'
+diff --git a/bin/omarchy-restart-audio b/bin/omarchy-restart-audio
+index c0ef0286..74b4b5fd 100755
+--- a/bin/omarchy-restart-audio
++++ b/bin/omarchy-restart-audio
+@@ -3,6 +3,16 @@
+ # omarchy:summary=Restart audio services and recover stuck USB audio devices.
+ # omarchy:examples=omarchy restart audio | omarchy-restart-audio
+ 
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  export PULSE_SERVER=tcp:127.0.0.1:4715
++  echo "Android audio is managed by the Omarchy PRoot launcher."
++  if omarchy-proot-audio status; then
++    exit 0
++  fi
++  echo "The Android audio bridge is unavailable; restart Omarchy from Termux." >&2
++  exit 1
++fi
++
+ services=(wireplumber.service pipewire.service pipewire-pulse.service)
+ 
+ restart_audio_services() {
+diff --git a/bin/omarchy-shell b/bin/omarchy-shell
+index ac8b3108..da1d690f 100755
+--- a/bin/omarchy-shell
++++ b/bin/omarchy-shell
+@@ -56,7 +56,14 @@ fi
+ # positionals. qs reports connection failures with a nonzero exit, but IPC-level
+ # failures (unknown target/function, bad arguments) go to stdout with exit 0.
+ ipc_timeout=${OMARCHY_SHELL_IPC_TIMEOUT:-2s}
+-output=$(timeout --kill-after=1s "$ipc_timeout" qs ipc -n -p "$OMARCHY_PATH/shell" call -- "$@" 2>/dev/null)
++instance_args=(-n -p "$OMARCHY_PATH/shell")
++# Separate PRoot-traced clients do not compare as the same display connection
++# even though they share this guest's one Wayland socket. Select the newest
++# matching Omarchy configuration across displays so shortcuts reach its shell.
++if [[ ${OMARCHY_PROOT:-0} == 1 ]]; then
++  instance_args+=(--any-display)
++fi
++output=$(timeout --kill-after=1s "$ipc_timeout" qs ipc "${instance_args[@]}" call -- "$@" 2>/dev/null)
+ ipc_status=$?
+ 
+ if (( ipc_status == 124 || ipc_status == 137 )); then
+diff --git a/bin/omarchy-theme-color b/bin/omarchy-theme-color
+index c5d09ca2..4a64d34f 100755
+--- a/bin/omarchy-theme-color
++++ b/bin/omarchy-theme-color
+@@ -289,9 +289,12 @@ fi
+ resolve_theme_colors
+ 
+ if [[ $OUTPUT == "all" ]]; then
++  sorted_keys=$(mktemp)
++  printf '%s\n' "${!THEME_COLORS[@]}" | LC_ALL=C sort >"$sorted_keys"
+   while IFS= read -r key; do
+     printf '%s\t%s\n' "$key" "${THEME_COLORS[$key]}"
+-  done < <(printf '%s\n' "${!THEME_COLORS[@]}" | LC_ALL=C sort)
++  done <"$sorted_keys"
++  rm "$sorted_keys"
+   exit 0
+ fi
+ 
+diff --git a/bin/omarchy-theme-set-templates b/bin/omarchy-theme-set-templates
+index de4d5991..c6172924 100755
+--- a/bin/omarchy-theme-set-templates
++++ b/bin/omarchy-theme-set-templates
+@@ -239,15 +239,18 @@ add_mix_value() {
+ }
+ 
+ add_mix_values() {
+-  local tpl token
++  local tpl token token_file
+   local -A seen=()
+ 
+   for tpl in "${template_files[@]}"; do
++    token_file=$(mktemp)
++    grep -hEo '\{\{[[:space:]]*mix(_strip|_rgb)?[[:space:]]+[A-Za-z0-9_]+[[:space:]]+[A-Za-z0-9_]+[[:space:]]+[0-9]+([.][0-9]+)?%?[[:space:]]*\}\}' "$tpl" >"$token_file" 2>/dev/null || true
+     while IFS= read -r token; do
+       [[ -n ${seen[$token]:-} ]] && continue
+       seen[$token]=1
+       add_mix_value "$token"
+-    done < <(grep -hEo '\{\{[[:space:]]*mix(_strip|_rgb)?[[:space:]]+[A-Za-z0-9_]+[[:space:]]+[A-Za-z0-9_]+[[:space:]]+[0-9]+([.][0-9]+)?%?[[:space:]]*\}\}' "$tpl" 2>/dev/null || true)
++    done <"$token_file"
++    rm "$token_file"
+   done
+ }
+ 
+@@ -278,15 +281,18 @@ add_gradient_function_value() {
+ }
+ 
+ add_gradient_function_values() {
+-  local tpl token
++  local tpl token token_file
+   local -A seen=()
+ 
+   for tpl in "${template_files[@]}"; do
++    token_file=$(mktemp)
++    grep -hEo '\{\{[[:space:]]*(hypr_gradient|gradient_start|shell_gradient)[[:space:]]+[^}]+[[:space:]]*\}\}' "$tpl" >"$token_file" 2>/dev/null || true
+     while IFS= read -r token; do
+       [[ -n ${seen[$token]:-} ]] && continue
+       seen[$token]=1
+       add_gradient_function_value "$token"
+-    done < <(grep -hEo '\{\{[[:space:]]*(hypr_gradient|gradient_start|shell_gradient)[[:space:]]+[^}]+[[:space:]]*\}\}' "$tpl" 2>/dev/null || true)
++    done <"$token_file"
++    rm "$token_file"
+   done
+ }
+ 
+@@ -370,15 +376,18 @@ apply_shell_section_overrides() {
+ # Only generate dynamic templates for themes with a colors.toml definition
+ if [[ -f $COLORS_FILE ]]; then
+   sed_script=$(mktemp)
++  resolved_colors=$(mktemp)
+ 
+   shopt -s nullglob
+   template_files=("$USER_TEMPLATES_DIR"/*.tpl "$TEMPLATES_DIR"/*.tpl)
+ 
+   # Parsing and alias/fallback resolution (legacy colorN names, derived
+   # shades, mode/theme_type) is shared with every other colors.toml consumer.
++  omarchy-theme-color --file "$COLORS_FILE" --all >"$resolved_colors"
+   while IFS=$'\t' read -r key value; do
+     THEME_COLORS[$key]="$value"
+-  done < <(omarchy-theme-color --file "$COLORS_FILE" --all)
++  done <"$resolved_colors"
++  rm "$resolved_colors"
+ 
+   for key in "${!THEME_COLORS[@]}"; do
+     add_template_value "$key" "${THEME_COLORS[$key]}"
+diff --git a/default/bash/init b/default/bash/init
+index c3d8c97a..75180802 100644
+--- a/default/bash/init
++++ b/default/bash/init
+@@ -1,4 +1,4 @@
+-if command -v mise &> /dev/null; then
++if [[ ${OMARCHY_PROOT:-0} != 1 ]] && command -v mise &> /dev/null; then
+   eval "$(mise activate bash)"
+ fi
+ 
+@@ -19,7 +19,9 @@ if command -v try &> /dev/null; then
+ fi
+ 
+ if command -v fzf &> /dev/null; then
+-  if [[ -f /usr/share/fzf/completion.bash ]]; then
++  # fzf's completion loader sources /dev/fd from process substitution, which
++  # PRoot cannot resolve. Keep its interactive key bindings in this mode.
++  if [[ ${OMARCHY_PROOT:-0} != 1 && -f /usr/share/fzf/completion.bash ]]; then
+     source /usr/share/fzf/completion.bash
+   fi
+   if [[ -f /usr/share/fzf/key-bindings.bash ]]; then
+diff --git a/default/hypr/autostart.lua b/default/hypr/autostart.lua
+index d6797290..f313bf74 100644
+--- a/default/hypr/autostart.lua
++++ b/default/hypr/autostart.lua
+@@ -1,4 +1,14 @@
+ hl.on("hyprland.start", function()
++  -- PRoot has neither systemd user services nor direct hardware access. More
++  -- importantly, Android 12+ counts every short-lived helper here as a
++  -- "phantom process" and may kill unrelated Termux children (tmux/Codex)
++  -- during the startup burst. Keep the real Omarchy shell, but omit helpers
++  -- whose services cannot function in this environment.
++  if os.getenv("OMARCHY_PROOT") == "1" then
++    hl.exec_cmd("omarchy-launch-shell")
++    return
++  end
++
+   -- Slow app launch fix -- set systemd vars before starting session services.
+   hl.exec_cmd("systemctl --user import-environment $(env | cut -d'=' -f 1)")
+   hl.exec_cmd("dbus-update-activation-environment --systemd --all")
+diff --git a/shell/plugins/agents/Main.qml b/shell/plugins/agents/Main.qml
+index cb8e8c2d..6e401805 100644
+--- a/shell/plugins/agents/Main.qml
++++ b/shell/plugins/agents/Main.qml
+@@ -8,6 +8,8 @@ import Quickshell.Io
+ // for changes, and optionally merges snapshots synced from other machines.
+ Item {
+   id: root
++  readonly property bool prootMode: Quickshell.env("OMARCHY_PROOT") === "1"
++                                  && Quickshell.env("OMARCHY_UNLIMITED_PROCS") !== "1"
+   visible: false
+ 
+   property var settings: ({})
+@@ -108,8 +110,10 @@ Item {
+   }
+ 
+   Component.onCompleted: {
+-    rescanAgents()
+-    if (syncConfigured()) scheduleSync()
++    if (!root.prootMode) {
++      rescanAgents()
++      if (syncConfigured()) scheduleSync()
++    }
+   }
+ 
+   // -------------------------------------------------------------- refresh
+@@ -119,7 +123,7 @@ Item {
+ 
+   Timer {
+     interval: root.refreshIntervalSec * 1000
+-    running: true
++    running: !root.prootMode
+     repeat: true
+     triggeredOnStart: true
+     onTriggered: root.runUpdate("normal")
+diff --git a/shell/plugins/bar/widgets/KeyboardLayout.qml b/shell/plugins/bar/widgets/KeyboardLayout.qml
+index 5457d88e..e0872aa5 100644
+--- a/shell/plugins/bar/widgets/KeyboardLayout.qml
++++ b/shell/plugins/bar/widgets/KeyboardLayout.qml
+@@ -9,6 +9,8 @@ import "KeyboardLayoutModel.js" as KeyboardLayoutModel
+ BarWidget {
+   id: root
+   moduleName: "omarchy.keyboard-layout"
++  readonly property bool prootMode: Quickshell.env("OMARCHY_PROOT") === "1"
++                                  && Quickshell.env("OMARCHY_UNLIMITED_PROCS") !== "1"
+ 
+ 
+   property string layoutFull: ""
+@@ -78,7 +80,7 @@ BarWidget {
+   }
+ 
+   Component.onCompleted: {
+-    briefsProc.running = true
++    if (!root.prootMode) briefsProc.running = true
+     refresh()
+   }
+ 
+diff --git a/shell/plugins/bar/widgets/SystemUpdate.qml b/shell/plugins/bar/widgets/SystemUpdate.qml
+index a4f9020f..3de0274a 100644
+--- a/shell/plugins/bar/widgets/SystemUpdate.qml
++++ b/shell/plugins/bar/widgets/SystemUpdate.qml
+@@ -7,6 +7,8 @@ import qs.Ui
+ BarWidget {
+   id: root
+   moduleName: "omarchy.system-update"
++  readonly property bool prootMode: Quickshell.env("OMARCHY_PROOT") === "1"
++                                  && Quickshell.env("OMARCHY_UNLIMITED_PROCS") !== "1"
+ 
+   property bool updateAvailable: false
+ 
+@@ -46,7 +48,7 @@ BarWidget {
+ 
+   Timer {
+     interval: 21600000
+-    running: true
++    running: !root.prootMode
+     repeat: true
+     triggeredOnStart: true
+     onTriggered: root.refresh()
+diff --git a/shell/plugins/clipboard/Clipboard.qml b/shell/plugins/clipboard/Clipboard.qml
+index da969e65..6102184a 100644
+--- a/shell/plugins/clipboard/Clipboard.qml
++++ b/shell/plugins/clipboard/Clipboard.qml
+@@ -8,6 +8,8 @@ import "ClipboardHistory.js" as ClipboardHistory
+ 
+ Item {
+   id: root
++  readonly property bool prootMode: Quickshell.env("OMARCHY_PROOT") === "1"
++                                  && Quickshell.env("OMARCHY_UNLIMITED_PROCS") !== "1"
+ 
+   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
+   property bool opened: false
+@@ -238,7 +240,9 @@ Item {
+     Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-clipboard-open", "--history-index", String(row.historyIndex)])
+   }
+ 
+-  Component.onCompleted: initProc.running = true
++  // Continuous wl-paste watchers cost several host processes under PRoot.
++  // Preserve the picker/UI and existing history without starting daemons.
++  Component.onCompleted: if (!root.prootMode) initProc.running = true
+ 
+   ListModel { id: displayModel }
+ 
+@@ -306,6 +310,7 @@ Item {
+     interval: 1000
+     repeat: false
+     onTriggered: {
++      if (root.prootMode) return
+       if (!textWatchProc.running) textWatchProc.running = true
+       if (!imageWatchProc.running) imageWatchProc.running = true
+     }
+@@ -432,7 +437,6 @@ Item {
+           color: "transparent"
+ 
+           Text {
+-            textFormat: Text.PlainText
+             anchors.left: parent.left
+             anchors.right: parent.right
+             anchors.verticalCenter: parent.verticalCenter
+@@ -501,7 +505,6 @@ Item {
+                     }
+ 
+                     Text {
+-                      textFormat: Text.PlainText
+                       width: parent.width - (parent.parent.previewImage.length > 0 ? parent.height + parent.spacing : 0)
+                       height: parent.height
+                       text: parent.parent.previewText
+@@ -548,7 +551,6 @@ Item {
+               }
+ 
+               Text {
+-                textFormat: Text.PlainText
+                 visible: parent.activeRow && !parent.activeRow.previewImage
+                 anchors.fill: parent
+                 anchors.leftMargin: root.contentMargin
+@@ -596,7 +598,6 @@ Item {
+             }
+ 
+             Text {
+-              textFormat: Text.PlainText
+               text: root.history.length === 0 ? "Clipboard is empty" : "No matches for “" + root.filterText + "”"
+               color: root.foreground
+               opacity: 0.7
+diff --git a/shell/plugins/lock/Service.qml b/shell/plugins/lock/Service.qml
+index 9ecb1cc0..b4307dc3 100644
+--- a/shell/plugins/lock/Service.qml
++++ b/shell/plugins/lock/Service.qml
+@@ -12,6 +12,7 @@ Item {
+   property string omarchyPath: ""
+ 
+   readonly property string home: Quickshell.env("HOME")
++  readonly property bool prootMode: Quickshell.env("OMARCHY_PROOT") === "1"
+   readonly property string stateHome: home + "/.local/state"
+   readonly property string userName: Quickshell.env("USER") || Quickshell.env("LOGNAME")
+   readonly property string currentBackgroundLink: stateHome + "/omarchy/current/background"
+@@ -32,7 +33,7 @@ Item {
+   property string lastEvent: "init"
+   property string lastEventAt: ""
+   property bool strandedLock: false
+-  property bool strandedLockResolved: false
++  property bool strandedLockResolved: prootMode
+ 
+   readonly property bool locked: lockRequested || sessionLock.locked || sessionLock.secure
+   readonly property bool authenticating: authenticatingPassword || fingerprintAuthenticating
+@@ -80,6 +81,13 @@ Item {
+   // a session locked this early is an orphan behind Hyprland's failsafe. Outputs
+   // are often still absent here, so ask until the answer means something.
+   function checkStrandedLock() {
++    // A fresh PRoot compositor cannot inherit an ext-session-lock from a
++    // previous systemd session. Avoid the repeated bash/hyprctl probes that
++    // otherwise consume several Android native-process slots at startup.
++    if (root.prootMode) {
++      strandedLockResolved = true
++      return
++    }
+     if (strandedLockResolved || strandedLockCheckProc.running) return
+ 
+     // A lock this shell took is nobody's orphan.
+@@ -104,6 +112,10 @@ Item {
+   }
+ 
+   function refreshFingerprintStatus() {
++    if (root.prootMode) {
++      fingerprintConfigured = false
++      return
++    }
+     if (!fingerprintCheckProc.running) fingerprintCheckProc.running = true
+   }
+ 
+@@ -495,6 +507,12 @@ Item {
+   onPasswordPamConfiguredChanged: {
+     if (!passwordPamConfigured) return
+ 
++    if (root.prootMode) {
++      strandedLock = false
++      strandedLockResolved = true
++      return
++    }
++
+     strandedLock = false
+     strandedLockResolved = false
+     strandedLockRetryTimer.rearm()
+diff --git a/shell/plugins/panels/audio/Panel.qml b/shell/plugins/panels/audio/Panel.qml
+index 26d0c58d..990dd1fa 100644
+--- a/shell/plugins/panels/audio/Panel.qml
++++ b/shell/plugins/panels/audio/Panel.qml
+@@ -13,6 +13,11 @@ Panel {
+   moduleName: "omarchy.audio"
+   ipcTarget: "omarchy.audio"
+ 
++  readonly property bool prootAudio: Quickshell.env("OMARCHY_PROOT") === "1"
++  property real prootOutputVolume: 0
++  property bool prootOutputMuted: true
++  property bool prootAudioAvailable: false
++
+   readonly property var sink: Pipewire.defaultAudioSink
+   readonly property var source: Pipewire.defaultAudioSource
+   readonly property var nodes: Pipewire.nodes ? Pipewire.nodes.values : []
+@@ -140,11 +145,19 @@ Panel {
+   onSinkChanged: resolveVolumeSink()
+ 
+   function resolveVolumeSink() {
++    if (prootAudio) {
++      volumeSinkName = ""
++      return
++    }
+     if (!volumeSinkProc.running) volumeSinkProc.running = true
+   }
+ 
+-  readonly property real outputVolume: volumeSink && volumeSink.audio ? volumeSink.audio.volume : 0
+-  readonly property bool outputMuted: volumeSink && volumeSink.audio ? volumeSink.audio.muted : false
++  readonly property real outputVolume: prootAudio
++    ? prootOutputVolume
++    : (volumeSink && volumeSink.audio ? volumeSink.audio.volume : 0)
++  readonly property bool outputMuted: prootAudio
++    ? prootOutputMuted
++    : (volumeSink && volumeSink.audio ? volumeSink.audio.muted : false)
+   readonly property real inputVolume: source && source.audio ? source.audio.volume : 0
+   readonly property bool inputMuted: source && source.audio ? source.audio.muted : false
+ 
+@@ -171,7 +184,9 @@ Panel {
+   // Only channels that actually exist get a vote. A box with no default source
+   // would otherwise report "input unmuted" forever, leaving the hero switch
+   // able to mute but never to unmute.
+-  readonly property bool hasOutput: !!(volumeSink && volumeSink.audio)
++  readonly property bool hasOutput: prootAudio
++    ? prootAudioAvailable
++    : !!(volumeSink && volumeSink.audio)
+   readonly property bool hasInput: !!(source && source.audio)
+   readonly property bool anyAudible: (hasOutput && !outputMuted) || (hasInput && !inputMuted)
+   readonly property string toggleHint: anyAudible ? "Mute" : "Unmute"
+@@ -401,6 +416,14 @@ Panel {
+   function outputIcon(volume) {
+     // Match the old Waybar pulseaudio glyph set. The Material Design speaker
+     // icons render visually smaller in JetBrainsMono Nerd Font.
++    if (prootAudio) {
++      if (!prootAudioAvailable || outputMuted) return ""
++      var pv = volume === undefined ? outputVolume : volume
++      if (pv >= 0.67) return ""
++      if (pv >= 0.34) return ""
++      if (pv > 0) return ""
++      return ""
++    }
+     if (!sink || !sink.audio) return ""
+     if (isHeadphones(sink)) return "󰋋"
+     if (outputMuted) return ""
+@@ -424,8 +447,17 @@ Panel {
+   }
+ 
+   function setOutputVolume(v) {
+-    if (!volumeSink || !volumeSink.audio) return outputVolume
+     var volume = Math.max(0, Math.min(1, v))
++    if (prootAudio) {
++      if (!prootAudioAvailable) return outputVolume
++      prootOutputVolume = volume
++      Quickshell.execDetached([
++        "omarchy-proot-audio", "volume", String(Math.round(volume * 100))
++      ])
++      prootAudioRefresh.restart()
++      return volume
++    }
++    if (!volumeSink || !volumeSink.audio) return outputVolume
+     volumeSink.audio.volume = volume
+     return volume
+   }
+@@ -444,6 +476,13 @@ Panel {
+   }
+ 
+   function toggleOutputMute() {
++    if (prootAudio) {
++      if (!prootAudioAvailable) return
++      prootOutputMuted = !prootOutputMuted
++      Quickshell.execDetached(["omarchy-proot-audio", "mute-toggle"])
++      prootAudioRefresh.restart()
++      return
++    }
+     if (volumeSink && volumeSink.audio) volumeSink.audio.muted = !volumeSink.audio.muted
+   }
+ 
+@@ -455,6 +494,10 @@ Panel {
+   // at once. It reads as on while anything is still audible, which keeps
+   // muting a single channel from the row below flipping the master switch.
+   function toggleAllMuted() {
++    if (prootAudio) {
++      toggleOutputMute()
++      return
++    }
+     var mute = anyAudible
+     if (hasOutput) volumeSink.audio.muted = mute
+     if (hasInput) source.audio.muted = mute
+@@ -573,14 +616,38 @@ Panel {
+   implicitWidth: button.implicitWidth
+   implicitHeight: button.implicitHeight
+ 
+-  PwObjectTracker { objects: root.candidateSinks }
+-  PwObjectTracker { objects: root.candidateSources }
+-  PwObjectTracker { objects: root.audioStreams }
++  PwObjectTracker { objects: root.prootAudio ? [] : root.candidateSinks }
++  PwObjectTracker { objects: root.prootAudio ? [] : root.candidateSources }
++  PwObjectTracker { objects: root.prootAudio ? [] : root.audioStreams }
+ 
+   PwNodePeakMonitor {
+     id: inputPeakMonitor
+     node: root.source
+-    enabled: root.opened && !!root.source
++    enabled: !root.prootAudio && root.opened && !!root.source
++  }
++
++  Process {
++    id: prootAudioStatusProc
++    command: ["omarchy-proot-audio", "status"]
++    stdout: StdioCollector {
++      waitForEnd: true
++      onStreamFinished: {
++        var fields = String(text).trim().split(/\s+/)
++        if (fields.length < 3) return
++        root.prootOutputVolume = Math.max(0, Math.min(1, Number(fields[0]) / 100))
++        root.prootOutputMuted = fields[1] === "1"
++        root.prootAudioAvailable = fields[2] === "1"
++      }
++    }
++  }
++
++  Timer {
++    id: prootAudioRefresh
++    interval: 2000
++    running: root.prootAudio
++    repeat: true
++    triggeredOnStart: true
++    onTriggered: if (!prootAudioStatusProc.running) prootAudioStatusProc.running = true
+   }
+ 
+   Process {
+@@ -603,7 +670,7 @@ Panel {
+ 
+   Timer {
+     interval: 5000
+-    running: root.opened
++    running: root.opened && !root.prootAudio
+     repeat: true
+     triggeredOnStart: true
+     onTriggered: if (!sinkAvailabilityProc.running) sinkAvailabilityProc.running = true
+@@ -614,7 +681,7 @@ Panel {
+   // tuning sink instead of the speakers.
+   Timer {
+     interval: 15000
+-    running: true
++    running: !root.prootAudio
+     repeat: true
+     triggeredOnStart: true
+     onTriggered: root.resolveVolumeSink()
+@@ -711,7 +778,6 @@ Panel {
+             // Status only — the switch owns muting, mouse and keyboard alike.
+             Text {
+               id: heroIcon
+-              textFormat: Text.PlainText
+               text: root.outputIcon()
+               color: root.bar.foreground
+               font.family: root.bar.fontFamily
+@@ -762,7 +828,6 @@ Panel {
+ 
+               Text {
+                 id: heroLabel
+-                textFormat: Text.PlainText
+                 text: root.outputVolumeName(
+                   outputSlider.dragging ? outputSlider.liveValue : root.outputVolume,
+                   root.outputMuted
+@@ -802,7 +867,6 @@ Panel {
+ 
+               Text {
+                 id: outputPercent
+-                textFormat: Text.PlainText
+                 text: Math.round((outputSlider.dragging ? outputSlider.liveValue : root.outputVolume) * 100) + "%"
+                 color: Qt.darker(root.bar.foreground, 1.4)
+                 font.family: root.bar.fontFamily
+@@ -889,7 +953,6 @@ Panel {
+ 
+               Text {
+                 id: microphonePercent
+-                textFormat: Text.PlainText
+                 text: Math.round((inputSlider.dragging ? inputSlider.liveValue : root.inputVolume) * 100) + "%"
+                 color: Qt.darker(root.bar.foreground, 1.4)
+                 font.family: root.bar.fontFamily
+@@ -1034,7 +1097,6 @@ Panel {
+       spacing: Style.space(8)
+ 
+       Text {
+-        textFormat: Text.PlainText
+         text: root.sinkGlyph(sinkRow.node)
+         color: root.bar.foreground
+         font.family: root.bar.fontFamily
+@@ -1045,7 +1107,6 @@ Panel {
+       }
+ 
+       Text {
+-        textFormat: Text.PlainText
+         text: root.nodeLabel(sinkRow.node)
+         color: root.bar.foreground
+         font.family: root.bar.fontFamily
+@@ -1095,7 +1156,6 @@ Panel {
+       spacing: Style.space(8)
+ 
+       Text {
+-        textFormat: Text.PlainText
+         text: root.sourceGlyph(sourceRow.node)
+         color: root.bar.foreground
+         font.family: root.bar.fontFamily
+@@ -1106,7 +1166,6 @@ Panel {
+       }
+ 
+       Text {
+-        textFormat: Text.PlainText
+         text: root.nodeLabel(sourceRow.node)
+         color: root.bar.foreground
+         font.family: root.bar.fontFamily
+@@ -1167,7 +1226,6 @@ Panel {
+ 
+         Text {
+           id: streamMuteIcon
+-          textFormat: Text.PlainText
+           text: streamRow.streamMuted ? "󰝟" : "󰕾"
+           color: root.bar.foreground
+           font.family: root.bar.fontFamily
+@@ -1188,7 +1246,6 @@ Panel {
+         }
+ 
+         Text {
+-          textFormat: Text.PlainText
+           text: root.streamLabel(streamRow.node)
+           color: root.bar.foreground
+           font.family: root.bar.fontFamily
+@@ -1201,7 +1258,6 @@ Panel {
+ 
+         Text {
+           id: streamPct
+-          textFormat: Text.PlainText
+           text: Math.round(streamRow.streamVolume * 100) + "%"
+           color: Qt.darker(root.bar.foreground, 1.5)
+           font.family: root.bar.fontFamily
+diff --git a/shell/plugins/panels/monitor/Panel.qml b/shell/plugins/panels/monitor/Panel.qml
+index bec38820..93857eb2 100644
+--- a/shell/plugins/panels/monitor/Panel.qml
++++ b/shell/plugins/panels/monitor/Panel.qml
+@@ -8,6 +8,8 @@ import "Model.js" as Model
+ 
+ Panel {
+   id: root
++  readonly property bool prootMode: Quickshell.env("OMARCHY_PROOT") === "1"
++                                  && Quickshell.env("OMARCHY_UNLIMITED_PROCS") !== "1"
+   moduleName: "omarchy.monitor"
+   ipcTarget: "omarchy.monitor"
+   manageIpc: false
+@@ -349,7 +351,10 @@ Panel {
+   implicitWidth: button.implicitWidth
+   implicitHeight: button.implicitHeight
+ 
+-  Component.onCompleted: refresh()
++  // Quickshell already tracks the PRoot output for the bar. Avoid launching
++  // the hardware-oriented brightness/monitor probe during the startup burst;
++  // the panel can still refresh on demand when opened.
++  Component.onCompleted: if (!root.prootMode) refresh()
+ 
+   // KeyboardPanel primes focus at open-time, so SUPER-bound IPC summons land
+   // with j/k ready to navigate. Keep a default landing point, but don't paint
+@@ -531,7 +536,6 @@ Panel {
+ 
+             Text {
+               id: heroIcon
+-              textFormat: Text.PlainText
+               text: root.displays.length > 1 ? "󰍺" : "󰍹"
+               color: root.bar.foreground
+               font.family: root.bar.fontFamily
+@@ -560,7 +564,6 @@ Panel {
+ 
+               Text {
+                 id: heroLabel
+-                textFormat: Text.PlainText
+                 text: {
+                   if (root.brightnessAvailable) {
+                     return root.brightnessName(brightnessSlider.dragging ? brightnessSlider.liveValue : root.brightnessPercent).toUpperCase()
+@@ -604,7 +607,6 @@ Panel {
+ 
+               Text {
+                 id: brightnessPercent
+-                textFormat: Text.PlainText
+                 text: Math.round(brightnessSlider.dragging ? brightnessSlider.liveValue : root.brightnessPercent) + "%"
+                 color: Qt.darker(root.bar.foreground, 1.4)
+                 font.family: root.bar.fontFamily
+@@ -677,7 +679,6 @@ Panel {
+ 
+               Text {
+                 id: textSizePx
+-                textFormat: Text.PlainText
+                 text: (textSizeSlider.dragging
+                        ? root.textSizeStops[Math.round(textSizeSlider.liveValue)]
+                        : root.displayedTextPx()) + "px"
+@@ -751,7 +752,6 @@ Panel {
+               // focused one.
+               Text {
+                 id: scaleMonitor
+-                textFormat: Text.PlainText
+                 text: root.focusedMonitor
+                 // Only worth naming when more than one display is in play.
+                 visible: root.focusedMonitor !== "" && root.enabledDisplayCount > 1
+@@ -892,7 +892,6 @@ Panel {
+       }
+ 
+       Text {
+-        textFormat: Text.PlainText
+         text: monitorRow.display.name + (monitorRow.display.focused ? " · focused" : "")
+         color: root.bar.foreground
+         font.family: root.bar.fontFamily
+@@ -903,7 +902,6 @@ Panel {
+       }
+ 
+       Text {
+-        textFormat: Text.PlainText
+         text: monitorRow.display.enabled ? "󰄬" : ""
+         color: root.bar.foreground
+         font.family: root.bar.fontFamily
+diff --git a/shell/plugins/panels/network/Panel.qml b/shell/plugins/panels/network/Panel.qml
+index d1e41149..1ffb4261 100644
+--- a/shell/plugins/panels/network/Panel.qml
++++ b/shell/plugins/panels/network/Panel.qml
+@@ -10,6 +10,7 @@ import "Model.js" as Model
+ 
+ Panel {
+   id: root
++  readonly property bool prootMode: Quickshell.env("OMARCHY_PROOT") === "1"
+   moduleName: "omarchy.network"
+   ipcTarget: "omarchy.network"
+   // manageIpc: false so this panel can own the single IpcHandler the target
+@@ -437,6 +438,9 @@ Panel {
+   // when both are up, matching the default-route device.
+   readonly property var wiredDevice: findDevice(DeviceType.Wired)
+   readonly property string kind: {
++    // Android owns the real connection; NetworkManager inside PRoot cannot
++    // see or control it, though the guest shares the phone's working network.
++    if (root.prootMode) return "ethernet"
+     if (wiredDevice && wiredDevice.connected) return "ethernet"
+     if (connectedWifiNetwork) return "wifi"
+     return "disconnected"
+@@ -470,6 +474,12 @@ Panel {
+ 
+   function refresh(scanWifi) {
+     if (scanWifi === undefined) scanWifi = false
++    if (root.prootMode) {
++      root.info = ({ iface: "Android", type: "ethernet" })
++      root.dnsProvider = "Android"
++      root.syncWifiNetworks()
++      return
++    }
+     if (!detailsProc.running) detailsProc.running = true
+     if (!dnsProc.running) {
+       dnsProc.command = ["bash", "-c", root.dnsCommand("")]
+@@ -857,7 +867,7 @@ Panel {
+     id: bandPoll
+     interval: 4000
+     repeat: true
+-    running: root.opened
++    running: root.opened && !root.prootMode
+     onTriggered: {
+       if (bandProc.running) return
+       bandProc.command = ["omarchy-network-band"]
+@@ -894,7 +904,7 @@ Panel {
+     id: detailsPoll
+     interval: 1500
+     repeat: true
+-    running: root.opened
++    running: root.opened && !root.prootMode
+     onTriggered: if (!detailsProc.running) detailsProc.running = true
+   }
+ 
+@@ -1090,7 +1100,6 @@ Panel {
+         // Status only — the switch owns toggling, mouse and keyboard alike.
+         Text {
+           id: heroIcon
+-          textFormat: Text.PlainText
+           text: root.icon
+           color: root.bar.foreground
+           font.family: root.bar.fontFamily
+@@ -1171,7 +1180,6 @@ Panel {
+           // rather than in a pill, which crowded the on/off switch.
+           Text {
+             id: heroSsid
+-            textFormat: Text.PlainText
+             width: parent.width
+ 
+             readonly property string title: {
+@@ -1191,7 +1199,6 @@ Panel {
+ 
+           Text {
+             id: heroMeta
+-            textFormat: Text.PlainText
+             width: parent.width
+             text: {
+               if (root.info.type === "wifi") {
+@@ -1714,7 +1721,6 @@ Panel {
+ 
+       Text {
+         id: networkIcon
+-        textFormat: Text.PlainText
+         text: row.net ? root.wifiIconFor(row.net.signal) : ""
+         color: row.statusColor
+         font.family: root.bar.fontFamily
+@@ -1736,7 +1742,6 @@ Panel {
+ 
+         Text {
+           id: lockIndicator
+-          textFormat: Text.PlainText
+           visible: row.requiresCredentials || row.forgetVisible
+           width: parent.width
+           anchors.verticalCenter: parent.verticalCenter
+@@ -1784,7 +1789,6 @@ Panel {
+         anchors.verticalCenter: parent.verticalCenter
+ 
+         Text {
+-          textFormat: Text.PlainText
+           text: row.net ? (row.net.ssid || "Hidden") : ""
+           color: root.bar.foreground
+           font.family: root.bar.fontFamily
+@@ -1793,7 +1797,6 @@ Panel {
+           width: parent.width
+         }
+         Text {
+-          textFormat: Text.PlainText
+           // Signal strength is conveyed by the wifi-bars icon and the
+           // right-edge glyph/buttons carry protection or forget affordances,
+           // so the second line only carries action status (Connecting…,
+@@ -1900,7 +1903,6 @@ Panel {
+         radius: Style.cornerRadius
+ 
+         Text {
+-          textFormat: Text.PlainText
+           anchors.fill: parent
+           horizontalAlignment: Text.AlignHCenter
+           verticalAlignment: Text.AlignVCenter
+@@ -1954,7 +1956,6 @@ Panel {
+   }
+ 
+   component InfoLabel: Text {
+-    textFormat: Text.PlainText
+     color: root.bar.foreground
+     opacity: 0.6
+     font.family: root.bar.fontFamily
+@@ -1962,7 +1963,6 @@ Panel {
+   }
+ 
+   component InfoValue: Text {
+-    textFormat: Text.PlainText
+     color: root.bar.foreground
+     font.family: root.bar.fontFamily
+     font.pixelSize: Style.font.bodySmall
+diff --git a/shell/plugins/panels/weather/Panel.qml b/shell/plugins/panels/weather/Panel.qml
+index edb12777..63f1dac9 100644
+--- a/shell/plugins/panels/weather/Panel.qml
++++ b/shell/plugins/panels/weather/Panel.qml
+@@ -7,6 +7,8 @@ import "Model.js" as Model
+ 
+ Panel {
+   id: root
++  readonly property bool prootMode: Quickshell.env("OMARCHY_PROOT") === "1"
++                                  && Quickshell.env("OMARCHY_UNLIMITED_PROCS") !== "1"
+   moduleName: "omarchy.weather"
+   ipcTarget: "omarchy.weather"
+   manageIpc: false
+@@ -148,6 +150,7 @@ Panel {
+   readonly property string reportHumidity:  current ? (current.humidity + "%") : ""
+ 
+   function refresh() {
++    if (root.prootMode) return
+     // Each full refresh cycle gets a fresh retry budget, so an earlier
+     // exhausted round (e.g. waking with the network still down) doesn't
+     // starve retries for the rest of the session.
+@@ -467,7 +470,7 @@ Panel {
+   Timer {
+     id: refreshTimer
+     interval: root.refreshMinutes * 60 * 1000
+-    running: true
++    running: !root.prootMode
+     repeat: true
+     triggeredOnStart: true
+     onTriggered: root.refresh()
+@@ -531,7 +534,6 @@ Panel {
+ 
+           Text {
+             id: heroIcon
+-            textFormat: Text.PlainText
+             anchors.verticalCenter: parent.verticalCenter
+             anchors.verticalCenterOffset: 5
+             text: root.label || "—"
+@@ -548,7 +550,6 @@ Panel {
+ 
+             Text {
+               id: tempBig
+-              textFormat: Text.PlainText
+               text: root.reportTempNum || "—"
+               color: root.bar.foreground
+               font.family: root.bar.fontFamily
+@@ -558,7 +559,6 @@ Panel {
+               font.bold: true
+             }
+             Text {
+-              textFormat: Text.PlainText
+               text: root.current ? root.tempUnit : ""
+               color: root.bar.foreground
+               font.family: root.bar.fontFamily
+@@ -596,7 +596,6 @@ Panel {
+               anchors.verticalCenter: parent.verticalCenter
+             }
+             Text {
+-              textFormat: Text.PlainText
+               text: (root.reportLocation || "").toUpperCase()
+               color: Qt.darker(root.bar.foreground, 1.4)
+               font.family: root.bar.fontFamily
+@@ -647,7 +646,6 @@ Panel {
+               color: !root.savingLocation && clearLocationArea.containsMouse ? Style.hoverFillFor(root.bar.foreground, Color.accent) : "transparent"
+ 
+               Text {
+-                textFormat: Text.PlainText
+                 anchors.centerIn: parent
+                 text: root.savingLocation ? "󰦖" : "✕"
+                 font.family: root.bar.fontFamily
+@@ -688,7 +686,6 @@ Panel {
+                 font.letterSpacing: 1
+               }
+               Text {
+-                textFormat: Text.PlainText
+                 text: root.reportFeels
+                 color: root.bar.foreground
+                 font.family: root.bar.fontFamily
+@@ -706,7 +703,6 @@ Panel {
+                 font.letterSpacing: 1
+               }
+               Text {
+-                textFormat: Text.PlainText
+                 text: root.reportWind
+                 color: root.bar.foreground
+                 font.family: root.bar.fontFamily
+@@ -724,7 +720,6 @@ Panel {
+                 font.letterSpacing: 1
+               }
+               Text {
+-                textFormat: Text.PlainText
+                 text: root.reportHumidity
+                 color: root.bar.foreground
+                 font.family: root.bar.fontFamily
+@@ -760,14 +755,12 @@ Panel {
+               spacing: Style.space(8)
+ 
+               Text {
+-                textFormat: Text.PlainText
+                 text: modelData.name
+                 color: index === root.suggestionIndex ? Style.hoverStateColor(root.bar.foreground, Color.accent) : root.bar.foreground
+                 font.family: root.bar.fontFamily
+                 font.pixelSize: Style.font.body
+               }
+               Text {
+-                textFormat: Text.PlainText
+                 visible: text !== ""
+                 text: modelData.description
+                 color: Qt.darker(root.bar.foreground, 1.5)
+@@ -827,7 +820,6 @@ Panel {
+               spacing: Style.space(10)
+ 
+               Text {
+-                textFormat: Text.PlainText
+                 anchors.verticalCenter: parent.verticalCenter
+                 text: root.dayIcon(modelData)
+                 color: root.bar.foreground
+@@ -840,7 +832,6 @@ Panel {
+                 spacing: Style.space(2)
+ 
+                 Text {
+-                  textFormat: Text.PlainText
+                   text: root.dayName(modelData.date).toUpperCase()
+                   color: Qt.darker(root.bar.foreground, 1.4)
+                   font.family: root.bar.fontFamily
+@@ -852,14 +843,12 @@ Panel {
+                   spacing: Style.space(6)
+ 
+                   Text {
+-                    textFormat: Text.PlainText
+                     text: root.bareTempForDay(modelData, "max")
+                     color: root.bar.foreground
+                     font.family: root.bar.fontFamily
+                     font.pixelSize: Style.font.body
+                   }
+                   Text {
+-                    textFormat: Text.PlainText
+                     text: root.bareTempForDay(modelData, "min")
+                     color: Qt.darker(root.bar.foreground, 1.5)
+                     font.family: root.bar.fontFamily
+diff --git a/shell/services/PluginRegistry.qml b/shell/services/PluginRegistry.qml
+index f08bf765..426c9ff3 100644
+--- a/shell/services/PluginRegistry.qml
++++ b/shell/services/PluginRegistry.qml
+@@ -9,6 +9,10 @@ QtObject {
+ 
+   property string home: Quickshell.env("HOME")
+   property string pluginsDir: home + "/.config/omarchy/plugins"
++  // QML Process-based manifest scans return an empty stream under PRoot even
++  // when Android's process restriction is disabled. The launch wrapper builds
++  // the same complete index with Bash built-ins before Quickshell starts.
++  readonly property bool prootMode: Quickshell.env("OMARCHY_PROOT") === "1"
+ 
+   // Set by shell.qml at startup so we can also scan bundled first-party plugins.
+   property string firstPartyDir: ""
+@@ -617,18 +621,28 @@ QtObject {
+ 
+   property Process scanProcess: Process {
+     onExited: function(exitCode) {
+-      var output = scanStdout.text || ""
+-      registry.parseScanOutput(output)
+-    }
+-    stdout: StdioCollector {
+-      id: scanStdout
+-      waitForEnd: true
++      if (exitCode !== 0) {
++        registry.scanning = false
++        console.warn("PluginRegistry: scanner exited with status " + exitCode)
++      } else {
++        scanOutputFile.reload()
++      }
+     }
+   }
+ 
++  readonly property string scanOutputPath: Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-plugin-scan.txt"
++
++  property FileView scanOutputFile: FileView {
++    path: registry.scanOutputPath
++    watchChanges: true
++    printErrors: false
++    onLoaded: registry.parseScanOutput(text())
++    onFileChanged: reload()
++  }
++
+   property Process initProcess: Process {
+     onExited: {
+-      localPluginWatcher.running = true
++      if (!registry.prootMode) localPluginWatcher.running = true
+       registry.rescan()
+     }
+   }
+@@ -656,12 +670,17 @@ QtObject {
+ 
+   property Timer localPluginWatcherRestart: Timer {
+     interval: 1000
+-    onTriggered: localPluginWatcher.running = true
++    onTriggered: if (!registry.prootMode) localPluginWatcher.running = true
+   }
+ 
+   function rescan() {
+     if (scanning) return
++    if (!firstPartyDir) return
+     scanning = true
++    if (registry.prootMode) {
++      scanOutputFile.reload()
++      return
++    }
+     // $0 = first-party dir, $1 = third-party dir. Some bash versions need the explicit -- separator.
+     // First-party plugins may be grouped one level deeper, e.g. panels/audio
+     // or services/battery.
+@@ -687,13 +706,17 @@ QtObject {
+       + "    emit_manifest thirdparty \"$sub/manifest.json\"; "
+       + "  done; "
+       + "}; "
+-      + "scan_firstparty \"$0\"; "
+-      + "scan_thirdparty \"$1\""
+-    scanProcess.command = ["bash", "-c", script, registry.firstPartyDir, registry.pluginsDir]
++      + "{ scan_firstparty \"$0\"; scan_thirdparty \"$1\"; } > \"$2.tmp\"; "
++      + "mv -f -- \"$2.tmp\" \"$2\""
++    scanProcess.command = ["bash", "-c", script, registry.firstPartyDir, registry.pluginsDir, registry.scanOutputPath]
+     scanProcess.running = true
+   }
+ 
+   function ensureUserDir() {
++    if (registry.prootMode) {
++      registry.rescan()
++      return
++    }
+     initProcess.command = ["bash", "-c", "mkdir -p \"$0\"", registry.pluginsDir]
+     initProcess.running = true
+   }
+-- 
+2.54.0

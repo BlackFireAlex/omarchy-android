@@ -1,0 +1,3891 @@
+From e3f2a6023ead0eae2381caa8a5ee2e3b8c8db162 Mon Sep 17 00:00:00 2001
+From: BlackFireAlex <8484750+BlackFireAlex@users.noreply.github.com>
+Date: Sat, 29 Aug 2026 19:34:16 -0700
+Subject: [PATCH] wayland: carry proven Android KGSL buffer pipeline
+
+---
+ CMakeLists.txt                                |  12 +-
+ flake.lock                                    |  18 +-
+ include/aquamarine/allocator/Allocator.hpp    |   5 +
+ include/aquamarine/allocator/DMAHeap.hpp      |  55 +++
+ include/aquamarine/allocator/SHM.hpp          |  53 +++
+ include/aquamarine/allocator/Vulkan.hpp       |  63 +++
+ include/aquamarine/backend/DRM.hpp            |  36 +-
+ include/aquamarine/backend/FrameScheduler.hpp |  17 +-
+ include/aquamarine/backend/Wayland.hpp        |  14 +-
+ include/aquamarine/backend/drm/Atomic.hpp     |   4 +
+ include/aquamarine/buffer/Buffer.hpp          |  18 +-
+ include/aquamarine/input/Input.hpp            |   7 +-
+ include/aquamarine/output/Output.hpp          |   4 +
+ nix/overlays.nix                              |   2 +-
+ src/allocator/DMAHeap.cpp                     | 134 +++++++
+ src/allocator/SHM.cpp                         | 125 ++++++
+ src/allocator/Swapchain.cpp                   |  52 ++-
+ src/allocator/Vulkan.cpp                      | 284 +++++++++++++
+ src/backend/Backend.cpp                       |  21 +
+ src/backend/FrameScheduler.cpp                |  24 +-
+ src/backend/Wayland.cpp                       | 289 +++++++++++--
+ src/backend/drm/DRM.cpp                       | 378 ++++++++++++------
+ src/backend/drm/Renderer.cpp                  |   5 +
+ src/backend/drm/impl/Atomic.cpp               | 183 ++++++++-
+ src/backend/drm/impl/Legacy.cpp               |   5 +-
+ src/buffer/Buffer.cpp                         |  59 +++
+ src/include/OutputTiming.hpp                  |  10 +
+ src/output/Output.cpp                         |  12 +
+ src/output/OutputTiming.cpp                   |  25 ++
+ tests/KGSLDMAHeapRenderProbe.cpp              | 147 +++++++
+ tests/KGSLGBMProbe.cpp                        |  45 +++
+ tests/KGSLGLExportProbe.cpp                   |  73 ++++
+ tests/KGSLGLExportWaylandProbe.cpp            | 119 ++++++
+ tests/KGSLGLFormatExportProbe.cpp             |  80 ++++
+ tests/KGSLVulkanEGLRenderProbe.cpp            | 151 +++++++
+ tests/KGSLVulkanExportProbe.cpp               | 153 +++++++
+ tests/Output.cpp                              |  62 +++
+ 37 files changed, 2524 insertions(+), 220 deletions(-)
+ create mode 100644 include/aquamarine/allocator/DMAHeap.hpp
+ create mode 100644 include/aquamarine/allocator/SHM.hpp
+ create mode 100644 include/aquamarine/allocator/Vulkan.hpp
+ create mode 100644 src/allocator/DMAHeap.cpp
+ create mode 100644 src/allocator/SHM.cpp
+ create mode 100644 src/allocator/Vulkan.cpp
+ create mode 100644 src/include/OutputTiming.hpp
+ create mode 100644 src/output/OutputTiming.cpp
+ create mode 100644 tests/KGSLDMAHeapRenderProbe.cpp
+ create mode 100644 tests/KGSLGBMProbe.cpp
+ create mode 100644 tests/KGSLGLExportProbe.cpp
+ create mode 100644 tests/KGSLGLExportWaylandProbe.cpp
+ create mode 100644 tests/KGSLGLFormatExportProbe.cpp
+ create mode 100644 tests/KGSLVulkanEGLRenderProbe.cpp
+ create mode 100644 tests/KGSLVulkanExportProbe.cpp
+ create mode 100644 tests/Output.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b1a7843..f827756 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -20,6 +20,7 @@ set(LIBDIR ${CMAKE_INSTALL_FULL_LIBDIR})
+ 
+ find_package(PkgConfig REQUIRED)
+ find_package(OpenGL REQUIRED COMPONENTS "GLES3")
++find_package(Vulkan REQUIRED)
+ find_package(hyprwayland-scanner 0.4.0 REQUIRED)
+ pkg_check_modules(
+   deps
+@@ -70,7 +71,7 @@ target_include_directories(
+   PRIVATE "./src" "./src/include" "./protocols" "${CMAKE_BINARY_DIR}")
+ set_target_properties(aquamarine PROPERTIES VERSION ${AQUAMARINE_VERSION}
+                                             SOVERSION 13)
+-target_link_libraries(aquamarine OpenGL::EGL OpenGL::OpenGL PkgConfig::deps)
++target_link_libraries(aquamarine OpenGL::EGL OpenGL::OpenGL Vulkan::Vulkan PkgConfig::deps)
+ 
+ check_include_file("sys/timerfd.h" HAS_TIMERFD)
+ pkg_check_modules(epoll IMPORTED_TARGET epoll-shim)
+@@ -149,6 +150,15 @@ add_test(
+   COMMAND attachments "attachments")
+ add_dependencies(tests attachments)
+ 
++add_executable(output "tests/Output.cpp")
++target_include_directories(output PRIVATE "./src/include")
++target_link_libraries(output PRIVATE PkgConfig::deps aquamarine)
++add_test(
++  NAME "output"
++  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tests
++  COMMAND output "output")
++add_dependencies(tests output)
++
+ # Installation
+ install(TARGETS aquamarine)
+ install(DIRECTORY "include/aquamarine" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+diff --git a/flake.lock b/flake.lock
+index 71a7385..b42beae 100644
+--- a/flake.lock
++++ b/flake.lock
+@@ -10,11 +10,11 @@
+         ]
+       },
+       "locked": {
+-        "lastModified": 1772459870,
+-        "narHash": "sha256-xxkK2Cvqxpf/4UGcJ/TyCwrvmiNWsKsJfFzHMp2bxis=",
++        "lastModified": 1786464080,
++        "narHash": "sha256-W1hxvumEM57yV+QwsZ4QdAHEqOkr7e4S8VAkLX60qDE=",
+         "owner": "hyprwm",
+         "repo": "hyprutils",
+-        "rev": "e63f3a79334dec49f8eb1691f66f18115df04085",
++        "rev": "c157fe1e3092b980cc69315a6631f89aff09dcce",
+         "type": "github"
+       },
+       "original": {
+@@ -33,11 +33,11 @@
+         ]
+       },
+       "locked": {
+-        "lastModified": 1772459835,
+-        "narHash": "sha256-978jRz/y/9TKmZb/qD4lEYHCQGHpEXGqy+8X2lFZsak=",
++        "lastModified": 1786464033,
++        "narHash": "sha256-QM8Qe4/L8lpdVN4bgwahmi+jyyc4fisseDMe4afcDxA=",
+         "owner": "hyprwm",
+         "repo": "hyprwayland-scanner",
+-        "rev": "0a692d4a645165eebd65f109146b8861e3a925e7",
++        "rev": "62e62c1ca23da17612c6890d4ad2064f575643db",
+         "type": "github"
+       },
+       "original": {
+@@ -48,11 +48,11 @@
+     },
+     "nixpkgs": {
+       "locked": {
+-        "lastModified": 1772198003,
+-        "narHash": "sha256-I45esRSssFtJ8p/gLHUZ1OUaaTaVLluNkABkk6arQwE=",
++        "lastModified": 1786247143,
++        "narHash": "sha256-8S3Kcxs7D4UtxJxSJZz0m14CGhuW0MxfrIwJxeGWGnQ=",
+         "owner": "NixOS",
+         "repo": "nixpkgs",
+-        "rev": "dd9b079222d43e1943b6ebd802f04fd959dc8e61",
++        "rev": "279b4a8275f032c566576b3f181fa0f27197f588",
+         "type": "github"
+       },
+       "original": {
+diff --git a/include/aquamarine/allocator/Allocator.hpp b/include/aquamarine/allocator/Allocator.hpp
+index 2dc1ee5..b913f4d 100644
+--- a/include/aquamarine/allocator/Allocator.hpp
++++ b/include/aquamarine/allocator/Allocator.hpp
+@@ -17,6 +17,11 @@ namespace Aquamarine {
+     enum eAllocatorType {
+         AQ_ALLOCATOR_TYPE_GBM = 0,
+         AQ_ALLOCATOR_TYPE_DRM_DUMB,
++        AQ_ALLOCATOR_TYPE_SHM,
++        // Android exposes DMA-BUF heaps without a DRM render node. Keep this
++        // value last so the ABI values used by existing allocators stay put.
++        AQ_ALLOCATOR_TYPE_DMA_HEAP,
++        AQ_ALLOCATOR_TYPE_VULKAN,
+     };
+ 
+     class IAllocator {
+diff --git a/include/aquamarine/allocator/DMAHeap.hpp b/include/aquamarine/allocator/DMAHeap.hpp
+new file mode 100644
+index 0000000..dda9133
+--- /dev/null
++++ b/include/aquamarine/allocator/DMAHeap.hpp
+@@ -0,0 +1,55 @@
++#pragma once
++
++#include "Allocator.hpp"
++
++namespace Aquamarine {
++    class CDMAHeapAllocator;
++    class CBackend;
++    class CSwapchain;
++
++    // A linear DMA-BUF allocated from Android's system DMA heap. This is the
++    // Android equivalent of the buffer object a DRM/GBM allocator would own.
++    class CDMAHeapBuffer : public IBuffer {
++      public:
++        virtual ~CDMAHeapBuffer();
++
++        virtual eBufferCapability caps();
++        virtual eBufferType       type();
++        virtual void              update(const Hyprutils::Math::CRegion& damage);
++        virtual bool              isSynchronous();
++        virtual bool              good();
++        virtual SDMABUFAttrs      dmabuf();
++
++      private:
++        CDMAHeapBuffer(const SAllocatorBufferParams& params, Hyprutils::Memory::CWeakPointer<CDMAHeapAllocator> allocator_);
++
++        Hyprutils::Memory::CWeakPointer<CDMAHeapAllocator> allocator;
++        SDMABUFAttrs                                      attrs{.success = false};
++
++        friend class CDMAHeapAllocator;
++    };
++
++    class CDMAHeapAllocator : public IAllocator {
++      public:
++        ~CDMAHeapAllocator();
++        static Hyprutils::Memory::CSharedPointer<CDMAHeapAllocator> create(Hyprutils::Memory::CWeakPointer<CBackend> backend_,
++                                                                            const std::string& heapPath = "/dev/dma_heap/system");
++
++        virtual Hyprutils::Memory::CSharedPointer<IBuffer> acquire(const SAllocatorBufferParams& params,
++                                                                   Hyprutils::Memory::CSharedPointer<CSwapchain> swapchain_);
++        virtual Hyprutils::Memory::CSharedPointer<CBackend> getBackend();
++        virtual int                                         drmFD();
++        virtual eAllocatorType                              type();
++
++        Hyprutils::Memory::CWeakPointer<CDMAHeapAllocator> self;
++
++      private:
++        CDMAHeapAllocator(int heapFD_, Hyprutils::Memory::CWeakPointer<CBackend> backend_, std::string heapPath_);
++
++        int                                       heapFD = -1;
++        std::string                               heapPath;
++        Hyprutils::Memory::CWeakPointer<CBackend> backend;
++
++        friend class CDMAHeapBuffer;
++    };
++}
+diff --git a/include/aquamarine/allocator/SHM.hpp b/include/aquamarine/allocator/SHM.hpp
+new file mode 100644
+index 0000000..002c5e7
+--- /dev/null
++++ b/include/aquamarine/allocator/SHM.hpp
+@@ -0,0 +1,53 @@
++#pragma once
++
++#include "Allocator.hpp"
++
++namespace Aquamarine {
++    class CSHMAllocator;
++    class CBackend;
++    class CSwapchain;
++
++    class CSHMBuffer : public IBuffer {
++      public:
++        virtual ~CSHMBuffer();
++
++        virtual eBufferCapability                      caps();
++        virtual eBufferType                            type();
++        virtual void                                   update(const Hyprutils::Math::CRegion& damage);
++        virtual bool                                   isSynchronous();
++        virtual bool                                   good();
++        virtual SSHMAttrs                              shm();
++        virtual std::tuple<uint8_t*, uint32_t, size_t> beginDataPtr(uint32_t flags);
++        virtual void                                   endDataPtr();
++
++      private:
++        CSHMBuffer(const SAllocatorBufferParams& params, Hyprutils::Memory::CWeakPointer<CSHMAllocator> allocator_);
++
++        Hyprutils::Memory::CWeakPointer<CSHMAllocator> allocator;
++        SSHMAttrs                                      attrs{.success = false};
++        uint8_t*                                       data      = nullptr;
++        size_t                                         bufferLen = 0;
++
++        friend class CSHMAllocator;
++    };
++
++    class CSHMAllocator : public IAllocator {
++      public:
++        ~CSHMAllocator();
++        static Hyprutils::Memory::CSharedPointer<CSHMAllocator> create(Hyprutils::Memory::CWeakPointer<CBackend> backend_);
++
++        virtual Hyprutils::Memory::CSharedPointer<IBuffer> acquire(const SAllocatorBufferParams& params,
++                                                                   Hyprutils::Memory::CSharedPointer<CSwapchain> swapchain_);
++        virtual Hyprutils::Memory::CSharedPointer<CBackend> getBackend();
++        virtual int                                         drmFD();
++        virtual eAllocatorType                              type();
++
++        Hyprutils::Memory::CWeakPointer<CSHMAllocator> self;
++
++      private:
++        CSHMAllocator(Hyprutils::Memory::CWeakPointer<CBackend> backend_);
++        Hyprutils::Memory::CWeakPointer<CBackend> backend;
++
++        friend class CSHMBuffer;
++    };
++}
+diff --git a/include/aquamarine/allocator/Vulkan.hpp b/include/aquamarine/allocator/Vulkan.hpp
+new file mode 100644
+index 0000000..18c447a
+--- /dev/null
++++ b/include/aquamarine/allocator/Vulkan.hpp
+@@ -0,0 +1,63 @@
++#pragma once
++
++#include "Allocator.hpp"
++
++#include <vulkan/vulkan.h>
++
++namespace Aquamarine {
++    class CVulkanAllocator;
++    class CBackend;
++    class CSwapchain;
++
++    class CVulkanBuffer : public IBuffer {
++      public:
++        virtual ~CVulkanBuffer();
++
++        virtual eBufferCapability caps();
++        virtual eBufferType       type();
++        virtual void              update(const Hyprutils::Math::CRegion& damage);
++        virtual bool              isSynchronous();
++        virtual bool              good();
++        virtual SDMABUFAttrs      dmabuf();
++
++      private:
++        CVulkanBuffer(const SAllocatorBufferParams& params, Hyprutils::Memory::CWeakPointer<CVulkanAllocator> allocator_);
++
++        Hyprutils::Memory::CWeakPointer<CVulkanAllocator> allocator;
++        VkImage                                          image  = VK_NULL_HANDLE;
++        VkDeviceMemory                                   memory = VK_NULL_HANDLE;
++        SDMABUFAttrs                                     attrs{.success = false};
++
++        friend class CVulkanAllocator;
++    };
++
++    // Turnip knows the memory/layout constraints for an Adreno color image.
++    // Allocate through Vulkan, then export the image's dedicated memory as a
++    // linear DMA-BUF which both Hyprland EGL and the parent Weston can import.
++    class CVulkanAllocator : public IAllocator {
++      public:
++        ~CVulkanAllocator();
++        static Hyprutils::Memory::CSharedPointer<CVulkanAllocator> create(Hyprutils::Memory::CWeakPointer<CBackend> backend_);
++
++        virtual Hyprutils::Memory::CSharedPointer<IBuffer> acquire(const SAllocatorBufferParams& params,
++                                                                   Hyprutils::Memory::CSharedPointer<CSwapchain> swapchain_);
++        virtual Hyprutils::Memory::CSharedPointer<CBackend> getBackend();
++        virtual int                                         drmFD();
++        virtual eAllocatorType                              type();
++
++        Hyprutils::Memory::CWeakPointer<CVulkanAllocator> self;
++
++      private:
++        CVulkanAllocator(Hyprutils::Memory::CWeakPointer<CBackend> backend_);
++        bool init();
++
++        Hyprutils::Memory::CWeakPointer<CBackend> backend;
++        VkInstance                               instance = VK_NULL_HANDLE;
++        VkPhysicalDevice                         physical = VK_NULL_HANDLE;
++        VkDevice                                 device   = VK_NULL_HANDLE;
++        uint32_t                                 queueFamily = UINT32_MAX;
++        PFN_vkGetMemoryFdKHR                     getMemoryFd = nullptr;
++
++        friend class CVulkanBuffer;
++    };
++}
+diff --git a/include/aquamarine/backend/DRM.hpp b/include/aquamarine/backend/DRM.hpp
+index b39f739..7bd3676 100644
+--- a/include/aquamarine/backend/DRM.hpp
++++ b/include/aquamarine/backend/DRM.hpp
+@@ -162,6 +162,15 @@ namespace Aquamarine {
+         std::vector<SDRMLayer> layers;
+         int32_t                refresh = 0; // unused
+ 
++        struct {
++            std::optional<uintptr_t>                       id; // nullopt when nothing is in flight
++            Hyprutils::Memory::CWeakPointer<SDRMConnector> connector;
++            bool                                           async = false; // PAGE_FLIP_ASYNC
++        } pendingFlip;
++
++        uintptr_t armPageFlip(Hyprutils::Memory::CWeakPointer<SDRMConnector> connector, bool async);
++        void      disarmPageFlip();
++
+         struct {
+             int gammaSize = 0;
+         } legacy;
+@@ -212,7 +221,9 @@ namespace Aquamarine {
+         virtual void                                                      moveCursor(const Hyprutils::Math::Vector2D& coord, bool skipSchedule = false);
+         virtual void                                                      scheduleFrame(const scheduleFrameReason reason = AQ_SCHEDULE_UNKNOWN);
+         virtual void                                                      setCursorVisible(bool visible);
++        virtual bool                                                      hasCursorPlane() const;
+         virtual Hyprutils::Math::Vector2D                                 cursorPlaneSize();
++        virtual std::optional<std::chrono::steady_clock::time_point>      nextVBlank() const;
+         virtual size_t                                                    getGammaSize();
+         virtual size_t                                                    getDeGammaSize();
+         virtual std::vector<SDRMFormat>                                   getRenderFormats();
+@@ -239,6 +250,7 @@ namespace Aquamarine {
+         Hyprutils::Memory::CSharedPointer<SDRMConnector>             connector;
+         Hyprutils::Memory::CSharedPointer<std::function<void(void)>> frameIdle;
+         Hyprutils::Signal::CHyprSignalListener                       frameReadyListener;
++        Hyprutils::Signal::CHyprSignalListener                       rescheduleListener;
+ 
+         struct {
+             Hyprutils::Memory::CSharedPointer<CSwapchain> swapchain;
+@@ -251,10 +263,6 @@ namespace Aquamarine {
+         friend class CDRMLease;
+     };
+ 
+-    struct SDRMPageFlip {
+-        Hyprutils::Memory::CWeakPointer<SDRMConnector> connector;
+-    };
+-
+     struct SDRMConnectorCommitData {
+         Hyprutils::Memory::CSharedPointer<CDRMFB> mainFB, cursorFB;
+         bool                                      modeset   = false;
+@@ -290,6 +298,12 @@ namespace Aquamarine {
+             uint64_t colorspace  = 0;
+             uint16_t contentType = 0;
+             uint32_t crtcID      = 0;
++
++            // true if the max_bpc property was actually added to the atomic request
++            // (i.e. not skipped as an unchanged cached value on a page-flip). only when
++            // this is set may a commit failure be attributed to max_bpc and trigger the
++            // max_bpc-less retry / maxBpcFailed workaround (see amdgpu eDP handling).
++            bool maxBpcEmitted = false;
+         } atomic;
+ 
+         void calculateMode(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector);
+@@ -314,11 +328,13 @@ namespace Aquamarine {
+         IOutput::SParsedEDID                           parseEDID(std::vector<uint8_t> data);
+         bool                                           commitState(SDRMConnectorCommitData& data);
+         void                                           applyCommit(const SDRMConnectorCommitData& data);
+-        void                                           rollbackCommit(const SDRMConnectorCommitData& data);
+         void                                           onPresent();
+         void                                           recheckCRTCProps();
+         void                                           parseTileInfo();
++        void                                           releaseFBBuffer(const Hyprutils::Memory::CSharedPointer<CDRMFB> fb);
+         void                                           releaseFBReferences();
++        void                                           invalidateFrame();
++        void                                           setCRTC(Hyprutils::Memory::CSharedPointer<SDRMCRTC> newCRTC);
+ 
+         Hyprutils::Memory::CSharedPointer<CDRMOutput>  output;
+         Hyprutils::Memory::CWeakPointer<CDRMBackend>   backend;
+@@ -339,14 +355,16 @@ namespace Aquamarine {
+ 
+         bool                                           cursorEnabled = false;
+         Hyprutils::Math::Vector2D                      cursorPos, cursorSize, cursorHotspot;
+-        Hyprutils::Memory::CSharedPointer<CDRMFB>      pendingCursorFB;
+ 
+-        SDRMPageFlip                                   pendingPageFlip;
+         CFrameScheduler                                sched;
+ 
+         // the current state is invalid and won't commit, don't try to modeset.
+         bool                                           commitTainted = false;
+ 
++        // set when an atomic commit with max_bpc fails; skips max_bpc on future
++        // commits for this connector (works around buggy drivers, e.g. amdgpu eDP).
++        bool                                           maxBpcFailed = false;
++
+         Hyprutils::Memory::CSharedPointer<SOutputMode> fallbackMode;
+ 
+         struct {
+@@ -435,6 +453,7 @@ namespace Aquamarine {
+         std::string                                                        gpuName;
+         virtual int                                                        drmRenderNodeFD();
+         virtual eBackendGPUDriver                                          gpuDriver();
++        Hyprutils::Memory::CSharedPointer<SDRMCRTC>                        crtcByID(uint32_t id);
+ 
+       private:
+         CDRMBackend(Hyprutils::Memory::CSharedPointer<CBackend> backend);
+@@ -477,6 +496,8 @@ namespace Aquamarine {
+         std::vector<Hyprutils::Memory::CSharedPointer<SDRMConnector>> connectors;
+         std::vector<SDRMFormat>                                       formats;
+         std::vector<SDRMFormat>                                       glFormats;
++        uintptr_t                                                     m_lastPageFlipID = 0;
++        uintptr_t                                                     nextPageFlipID();
+ 
+         Hyprutils::Memory::CSharedPointer<CDRMDumbAllocator>          dumbAllocator;
+ 
+@@ -502,7 +523,6 @@ namespace Aquamarine {
+         friend struct SDRMCRTC;
+         friend struct SDRMPlane;
+         friend class CDRMOutput;
+-        friend struct SDRMPageFlip;
+         friend class CDRMLegacyImpl;
+         friend class CDRMAtomicImpl;
+         friend class CDRMAtomicRequest;
+diff --git a/include/aquamarine/backend/FrameScheduler.hpp b/include/aquamarine/backend/FrameScheduler.hpp
+index d249a30..dd5ed1d 100644
+--- a/include/aquamarine/backend/FrameScheduler.hpp
++++ b/include/aquamarine/backend/FrameScheduler.hpp
+@@ -39,13 +39,24 @@ namespace Aquamarine {
+         bool frameRunning() const;
+         void setFrameRunning(bool v);
+ 
++        // a scheduleFrame arrived while a frame was running, so reschedule it when the frame is done.
++        void requestReschedule();
++
+         // Fires from onFrameComplete. The output wires this to events.frame.emit.
+         Hyprutils::Signal::CSignalT<> frameReady;
+ 
++        // Emitted from ~CFrameRunningGuard if m_rescheduleRequested is set,
++        // including while a host frame callback is pending. The output uses
++        // this replay to preserve its needsFrame bit until that callback.
++        Hyprutils::Signal::CSignalT<> rescheduleNeeded;
++
+       private:
+-        bool m_pending        = false;
+-        bool m_frameScheduled = false;
+-        bool m_frameRunning   = false;
++        bool m_pending             = false;
++        bool m_frameScheduled      = false;
++        bool m_frameRunning        = false;
++        bool m_rescheduleRequested = false;
++
++        friend class CFrameRunningGuard;
+     };
+ 
+     // RAII pair for isFrameRunning: set on ctor, cleared on every exit path so a
+diff --git a/include/aquamarine/backend/Wayland.hpp b/include/aquamarine/backend/Wayland.hpp
+index c9ed136..d8e6006 100644
+--- a/include/aquamarine/backend/Wayland.hpp
++++ b/include/aquamarine/backend/Wayland.hpp
+@@ -25,6 +25,7 @@ namespace Aquamarine {
+         CWaylandBuffer(Hyprutils::Memory::CSharedPointer<IBuffer> buffer_, Hyprutils::Memory::CWeakPointer<CWaylandBackend> backend_);
+         ~CWaylandBuffer();
+         bool good();
++        bool usesPresentationDMABUF() const;
+ 
+         bool pendingRelease = false;
+ 
+@@ -35,6 +36,7 @@ namespace Aquamarine {
+ 
+         Hyprutils::Memory::CWeakPointer<IBuffer>         buffer;
+         Hyprutils::Memory::CWeakPointer<CWaylandBackend> backend;
++        bool                                             presentationDMABUF = false;
+ 
+         friend class CWaylandOutput;
+     };
+@@ -67,8 +69,9 @@ namespace Aquamarine {
+         void                                              onEnter(Hyprutils::Memory::CSharedPointer<CCWlPointer> pointer, uint32_t serial);
+ 
+         // frame loop — unified scheduler shared with DRM. See CFrameScheduler.
+-        CFrameScheduler                                   sched;
+-        Hyprutils::Signal::CHyprSignalListener            frameReadyListener;
++        CFrameScheduler                                              sched;
++        Hyprutils::Signal::CHyprSignalListener                       frameReadyListener;
++        Hyprutils::Signal::CHyprSignalListener                       rescheduleListener;
+         Hyprutils::Memory::CSharedPointer<std::function<void(void)>> frameIdle;
+ 
+         struct {
+@@ -88,6 +91,9 @@ namespace Aquamarine {
+             Hyprutils::Memory::CSharedPointer<CCXdgSurface>  xdgSurface;
+             Hyprutils::Memory::CSharedPointer<CCXdgToplevel> xdgToplevel;
+             Hyprutils::Memory::CSharedPointer<CCWlCallback>  frameCallback;
++            Hyprutils::Math::Vector2D                        surfaceSize;
++            Hyprutils::Math::Vector2D                        pendingConfigureSize;
++            bool                                             configured = false;
+         } waylandState;
+ 
+         friend class CWaylandBackend;
+@@ -119,6 +125,8 @@ namespace Aquamarine {
+         Hyprutils::Memory::CWeakPointer<CWaylandBackend> backend;
+ 
+       private:
++        void              emitWarp(uint32_t timeMs, wl_fixed_t x, wl_fixed_t y);
++
+         const std::string name = "wl_pointer";
+     };
+ 
+@@ -139,6 +147,8 @@ namespace Aquamarine {
+         virtual Hyprutils::Memory::CSharedPointer<IAllocator>              preferredAllocator();
+         virtual std::vector<Hyprutils::Memory::CSharedPointer<IAllocator>> getAllocators();
+         virtual Hyprutils::Memory::CWeakPointer<IBackendImplementation>    getPrimary();
++        bool                                                               supportsLinearDmabuf() const;
++        bool                                                               supportsDmabuf(uint32_t format, uint64_t modifier) const;
+ 
+         Hyprutils::Memory::CWeakPointer<CWaylandBackend>                   self;
+         virtual int                                                        drmRenderNodeFD();
+diff --git a/include/aquamarine/backend/drm/Atomic.hpp b/include/aquamarine/backend/drm/Atomic.hpp
+index 919729b..2ae97b1 100644
+--- a/include/aquamarine/backend/drm/Atomic.hpp
++++ b/include/aquamarine/backend/drm/Atomic.hpp
+@@ -25,6 +25,7 @@ namespace Aquamarine {
+ 
+         void setConnector(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector);
+         void addConnector(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector, SDRMConnectorCommitData& data);
++        bool restateConnectors(Hyprutils::Memory::CSharedPointer<SDRMConnector> self);
+         void addConnectorModeset(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector, SDRMConnectorCommitData& data);
+         void addConnectorCursor(Hyprutils::Memory::CSharedPointer<SDRMConnector> connector, SDRMConnectorCommitData& data);
+         bool commit(uint32_t flagssss);
+@@ -45,5 +46,8 @@ namespace Aquamarine {
+         Hyprutils::Memory::CWeakPointer<CDRMBackend>     backend;
+         drmModeAtomicReq*                                req = nullptr;
+         Hyprutils::Memory::CSharedPointer<SDRMConnector> conn;
++
++        // mode blobs minted by restateConnectors, owned by this request
++        std::vector<uint32_t> borrowedModeBlobs;
+     };
+ };
+diff --git a/include/aquamarine/buffer/Buffer.hpp b/include/aquamarine/buffer/Buffer.hpp
+index fc7b25f..ea78aa5 100644
+--- a/include/aquamarine/buffer/Buffer.hpp
++++ b/include/aquamarine/buffer/Buffer.hpp
+@@ -41,9 +41,7 @@ namespace Aquamarine {
+ 
+     class IBuffer {
+       public:
+-        virtual ~IBuffer() {
+-            attachments.clear();
+-        };
++        virtual ~IBuffer();
+ 
+         virtual eBufferCapability                      caps()                                         = 0;
+         virtual eBufferType                            type()                                         = 0;
+@@ -59,6 +57,16 @@ namespace Aquamarine {
+         virtual void                                   unlock();
+         virtual bool                                   locked();
+ 
++        // A renderer may own a GPU-native image even when the backend's
++        // compatibility allocator supplied SHM.  Keep a duplicated set of
++        // DMA-BUF descriptors here so a nested Wayland backend can present
++        // that image directly without changing swapchain ownership.
++        bool                                           setPresentationDMABUF(const SDMABUFAttrs& attrs);
++        SDMABUFAttrs                                   presentationDMABUF() const;
++        void                                           clearPresentationDMABUF();
++        void                                           setPresentationDMABUFActive(bool active);
++        bool                                           presentationDMABUFActive() const;
++
+         Hyprutils::Math::Vector2D                      size;
+         bool                                           opaque          = false;
+         bool                                           lockedByBackend = false;
+@@ -71,7 +79,9 @@ namespace Aquamarine {
+         } events;
+ 
+       private:
+-        int locks = 0;
++        int         locks = 0;
++        SDMABUFAttrs presentationDMABUFAttrs;
++        bool        presentationDMABUFIsActive = false;
+     };
+ 
+ };
+diff --git a/include/aquamarine/input/Input.hpp b/include/aquamarine/input/Input.hpp
+index 2361d40..b22c8ae 100644
+--- a/include/aquamarine/input/Input.hpp
++++ b/include/aquamarine/input/Input.hpp
+@@ -2,11 +2,13 @@
+ 
+ #include <hyprutils/signal/Signal.hpp>
+ #include <hyprutils/math/Vector2D.hpp>
++#include <hyprutils/memory/WeakPtr.hpp>
+ 
+ struct libinput_device;
+ struct libinput_tablet_tool;
+ 
+ namespace Aquamarine {
++    class IOutput;
+     class ITabletTool;
+ 
+     class IKeyboard {
+@@ -67,8 +69,9 @@ namespace Aquamarine {
+         };
+ 
+         struct SWarpEvent {
+-            uint32_t                  timeMs = 0;
+-            Hyprutils::Math::Vector2D absolute;
++            uint32_t                                 timeMs = 0;
++            Hyprutils::Math::Vector2D                absolute;
++            Hyprutils::Memory::CWeakPointer<IOutput> output; // absolute is local to this output when present
+         };
+ 
+         struct SButtonEvent {
+diff --git a/include/aquamarine/output/Output.hpp b/include/aquamarine/output/Output.hpp
+index 9ed5514..b8bf42f 100644
+--- a/include/aquamarine/output/Output.hpp
++++ b/include/aquamarine/output/Output.hpp
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <chrono>
+ #include <vector>
+ #include <optional>
+ #include <hyprutils/signal/Signal.hpp>
+@@ -90,6 +91,7 @@ namespace Aquamarine {
+ 
+         const SInternalState& state();
+ 
++        bool                  needsReconfig() const;
+         void                  addDamage(const Hyprutils::Math::CRegion& region);
+         void                  clearDamage();
+         void                  setEnabled(bool enabled);
+@@ -174,7 +176,9 @@ namespace Aquamarine {
+         virtual bool                                                      setCursor(Hyprutils::Memory::CSharedPointer<IBuffer> buffer, const Hyprutils::Math::Vector2D& hotspot);
+         virtual void                                                      moveCursor(const Hyprutils::Math::Vector2D& coord, bool skipSchedule = false); // includes the hotspot
+         virtual void                                                      setCursorVisible(bool visible); // moving the cursor will make it visible again without this util
++        virtual bool                                                      hasCursorPlane() const;
+         virtual Hyprutils::Math::Vector2D                                 cursorPlaneSize();              // -1, -1 means no set size, 0, 0 means error
++        virtual std::optional<std::chrono::steady_clock::time_point>      nextVBlank() const;
+         virtual void                                                      scheduleFrame(const scheduleFrameReason reason = AQ_SCHEDULE_UNKNOWN);
+         virtual size_t                                                    getGammaSize();
+         virtual size_t                                                    getDeGammaSize();
+diff --git a/nix/overlays.nix b/nix/overlays.nix
+index 6b8b7ff..213b42d 100644
+--- a/nix/overlays.nix
++++ b/nix/overlays.nix
+@@ -26,7 +26,7 @@ in
+ 
+   aquamarine = final: prev: {
+     aquamarine = final.callPackage ./default.nix {
+-      stdenv = final.gcc15Stdenv;
++      stdenv = final.gcc16Stdenv;
+       version =
+         version
+         + "+date="
+diff --git a/src/allocator/DMAHeap.cpp b/src/allocator/DMAHeap.cpp
+new file mode 100644
+index 0000000..8fa6895
+--- /dev/null
++++ b/src/allocator/DMAHeap.cpp
+@@ -0,0 +1,134 @@
++#include <aquamarine/allocator/DMAHeap.hpp>
++#include <aquamarine/backend/Backend.hpp>
++
++#include <drm_fourcc.h>
++#include <fcntl.h>
++#include <linux/dma-heap.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++
++#include <cerrno>
++#include <cstring>
++#include <format>
++
++using namespace Aquamarine;
++using namespace Hyprutils::Memory;
++#define SP CSharedPointer
++
++Aquamarine::CDMAHeapBuffer::CDMAHeapBuffer(const SAllocatorBufferParams& params, CWeakPointer<CDMAHeapAllocator> allocator_) : allocator(allocator_) {
++    if (!allocator || params.size.x <= 0 || params.size.y <= 0)
++        return;
++
++    const uint32_t format = params.format == DRM_FORMAT_INVALID ? DRM_FORMAT_XRGB8888 : params.format;
++    if (format != DRM_FORMAT_XRGB8888 && format != DRM_FORMAT_ARGB8888) {
++        allocator->backend->log(AQ_LOG_ERROR, std::format("DMAHeap: unsupported format 0x{:x}", format));
++        return;
++    }
++
++    const uint64_t width  = static_cast<uint64_t>(params.size.x);
++    const uint64_t height = static_cast<uint64_t>(params.size.y);
++    // Qualcomm importers accept linear RGB with a naturally aligned row. A
++    // 64-byte row alignment also avoids partial cache lines on wide displays.
++    const uint64_t stride = (width * 4U + 63U) & ~63U;
++    const uint64_t bytes  = stride * height;
++    const long     page   = sysconf(_SC_PAGESIZE);
++    const uint64_t align  = page > 0 ? static_cast<uint64_t>(page) : 4096U;
++    const uint64_t length = (bytes + align - 1U) & ~(align - 1U);
++
++    if (stride > UINT32_MAX || length < bytes) {
++        allocator->backend->log(AQ_LOG_ERROR, "DMAHeap: buffer dimensions overflow");
++        return;
++    }
++
++    dma_heap_allocation_data allocation{
++        .len        = length,
++        .fd         = 0,
++        .fd_flags   = O_RDWR | O_CLOEXEC,
++        .heap_flags = 0,
++    };
++
++    if (ioctl(allocator->heapFD, DMA_HEAP_IOCTL_ALLOC, &allocation) < 0) {
++        allocator->backend->log(AQ_LOG_ERROR, std::format("DMAHeap: allocation of {} bytes failed: {}", length, strerror(errno)));
++        return;
++    }
++
++    attrs.success    = true;
++    attrs.size       = params.size;
++    attrs.format     = format;
++    attrs.modifier   = DRM_FORMAT_MOD_LINEAR;
++    attrs.planes     = 1;
++    attrs.fds[0]     = static_cast<int>(allocation.fd);
++    attrs.offsets[0] = 0;
++    attrs.strides[0] = static_cast<uint32_t>(stride);
++    size             = params.size;
++    opaque           = format == DRM_FORMAT_XRGB8888;
++
++    allocator->backend->log(AQ_LOG_DEBUG,
++                            std::format("DMAHeap: allocated {}x{} linear buffer, stride {}, fd {}", width, height, stride, attrs.fds[0]));
++}
++
++Aquamarine::CDMAHeapBuffer::~CDMAHeapBuffer() {
++    events.destroy.emit();
++    if (attrs.fds[0] >= 0)
++        close(attrs.fds[0]);
++}
++
++eBufferCapability Aquamarine::CDMAHeapBuffer::caps() {
++    return BUFFER_CAPABILITY_NONE;
++}
++
++eBufferType Aquamarine::CDMAHeapBuffer::type() {
++    return BUFFER_TYPE_DMABUF;
++}
++
++void Aquamarine::CDMAHeapBuffer::update(const Hyprutils::Math::CRegion& damage) {}
++
++bool Aquamarine::CDMAHeapBuffer::isSynchronous() {
++    return false;
++}
++
++bool Aquamarine::CDMAHeapBuffer::good() {
++    return attrs.success && attrs.fds[0] >= 0;
++}
++
++SDMABUFAttrs Aquamarine::CDMAHeapBuffer::dmabuf() {
++    return attrs;
++}
++
++Aquamarine::CDMAHeapAllocator::CDMAHeapAllocator(int heapFD_, CWeakPointer<CBackend> backend_, std::string heapPath_) :
++    heapFD(heapFD_), heapPath(std::move(heapPath_)), backend(backend_) {}
++
++Aquamarine::CDMAHeapAllocator::~CDMAHeapAllocator() {
++    if (heapFD >= 0)
++        close(heapFD);
++}
++
++SP<CDMAHeapAllocator> Aquamarine::CDMAHeapAllocator::create(CWeakPointer<CBackend> backend_, const std::string& heapPath) {
++    const int fd = open(heapPath.c_str(), O_RDONLY | O_CLOEXEC);
++    if (fd < 0) {
++        backend_->log(AQ_LOG_ERROR, std::format("DMAHeap: cannot open {}: {}", heapPath, strerror(errno)));
++        return nullptr;
++    }
++
++    auto allocator  = SP<CDMAHeapAllocator>(new CDMAHeapAllocator(fd, backend_, heapPath));
++    allocator->self = allocator;
++    backend_->log(AQ_LOG_DEBUG, std::format("DMAHeap: using Android system heap {}", heapPath));
++    return allocator;
++}
++
++SP<IBuffer> Aquamarine::CDMAHeapAllocator::acquire(const SAllocatorBufferParams& params, SP<CSwapchain> swapchain_) {
++    auto buffer = SP<IBuffer>(new CDMAHeapBuffer(params, self));
++    return buffer->good() ? buffer : nullptr;
++}
++
++SP<CBackend> Aquamarine::CDMAHeapAllocator::getBackend() {
++    return backend.lock();
++}
++
++int Aquamarine::CDMAHeapAllocator::drmFD() {
++    return -1;
++}
++
++eAllocatorType Aquamarine::CDMAHeapAllocator::type() {
++    return AQ_ALLOCATOR_TYPE_DMA_HEAP;
++}
+diff --git a/src/allocator/SHM.cpp b/src/allocator/SHM.cpp
+new file mode 100644
+index 0000000..59e4ae0
+--- /dev/null
++++ b/src/allocator/SHM.cpp
+@@ -0,0 +1,125 @@
++#include <aquamarine/allocator/SHM.hpp>
++#include <aquamarine/backend/Backend.hpp>
++
++#include <drm_fourcc.h>
++#include <linux/memfd.h>
++#include <sys/mman.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++
++#include <cerrno>
++#include <cstring>
++#include <format>
++
++using namespace Aquamarine;
++using namespace Hyprutils::Memory;
++#define SP CSharedPointer
++
++Aquamarine::CSHMBuffer::CSHMBuffer(const SAllocatorBufferParams& params, CWeakPointer<CSHMAllocator> allocator_) : allocator(allocator_) {
++    if (params.size.x <= 0 || params.size.y <= 0)
++        return;
++
++    const uint32_t format = params.format == DRM_FORMAT_INVALID ? DRM_FORMAT_XRGB8888 : params.format;
++    if (format != DRM_FORMAT_XRGB8888 && format != DRM_FORMAT_ARGB8888) {
++        allocator->backend->log(AQ_LOG_ERROR, std::format("SHM: unsupported format {}", format));
++        return;
++    }
++
++    const int width  = static_cast<int>(params.size.x);
++    const int height = static_cast<int>(params.size.y);
++    const int stride = width * 4;
++    bufferLen        = static_cast<size_t>(stride) * static_cast<size_t>(height);
++
++    const int fd = static_cast<int>(syscall(SYS_memfd_create, "aquamarine-shm", MFD_CLOEXEC));
++    if (fd < 0) {
++        allocator->backend->log(AQ_LOG_ERROR, std::format("SHM: memfd_create failed: {}", strerror(errno)));
++        return;
++    }
++
++    if (ftruncate(fd, static_cast<off_t>(bufferLen)) < 0) {
++        allocator->backend->log(AQ_LOG_ERROR, std::format("SHM: ftruncate failed: {}", strerror(errno)));
++        close(fd);
++        return;
++    }
++
++    data = static_cast<uint8_t*>(mmap(nullptr, bufferLen, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
++    if (data == MAP_FAILED) {
++        allocator->backend->log(AQ_LOG_ERROR, std::format("SHM: mmap failed: {}", strerror(errno)));
++        data = nullptr;
++        close(fd);
++        return;
++    }
++
++    memset(data, 0, bufferLen);
++
++    size          = params.size;
++    attrs.success = true;
++    attrs.fd      = fd;
++    attrs.format  = format;
++    attrs.size    = params.size;
++    attrs.stride  = stride;
++    attrs.offset  = 0;
++}
++
++Aquamarine::CSHMBuffer::~CSHMBuffer() {
++    events.destroy.emit();
++    if (data)
++        munmap(data, bufferLen);
++    if (attrs.fd >= 0)
++        close(attrs.fd);
++}
++
++eBufferCapability Aquamarine::CSHMBuffer::caps() {
++    return BUFFER_CAPABILITY_DATAPTR;
++}
++
++eBufferType Aquamarine::CSHMBuffer::type() {
++    return BUFFER_TYPE_SHM;
++}
++
++void Aquamarine::CSHMBuffer::update(const Hyprutils::Math::CRegion& damage) {}
++
++bool Aquamarine::CSHMBuffer::isSynchronous() {
++    return true;
++}
++
++bool Aquamarine::CSHMBuffer::good() {
++    return attrs.success && data;
++}
++
++SSHMAttrs Aquamarine::CSHMBuffer::shm() {
++    return attrs;
++}
++
++std::tuple<uint8_t*, uint32_t, size_t> Aquamarine::CSHMBuffer::beginDataPtr(uint32_t flags) {
++    return {data, attrs.format, bufferLen};
++}
++
++void Aquamarine::CSHMBuffer::endDataPtr() {}
++
++Aquamarine::CSHMAllocator::CSHMAllocator(CWeakPointer<CBackend> backend_) : backend(backend_) {}
++Aquamarine::CSHMAllocator::~CSHMAllocator() = default;
++
++SP<CSHMAllocator> Aquamarine::CSHMAllocator::create(CWeakPointer<CBackend> backend_) {
++    auto allocator  = SP<CSHMAllocator>(new CSHMAllocator(backend_));
++    allocator->self = allocator;
++    backend_->log(AQ_LOG_DEBUG, "SHM: created a memory allocator for the nested Wayland backend");
++    return allocator;
++}
++
++SP<IBuffer> Aquamarine::CSHMAllocator::acquire(const SAllocatorBufferParams& params, SP<CSwapchain> swapchain_) {
++    auto buffer = SP<IBuffer>(new CSHMBuffer(params, self));
++    return buffer->good() ? buffer : nullptr;
++}
++
++SP<CBackend> Aquamarine::CSHMAllocator::getBackend() {
++    return backend.lock();
++}
++
++int Aquamarine::CSHMAllocator::drmFD() {
++    return -1;
++}
++
++eAllocatorType Aquamarine::CSHMAllocator::type() {
++    return AQ_ALLOCATOR_TYPE_SHM;
++}
+diff --git a/src/allocator/Swapchain.cpp b/src/allocator/Swapchain.cpp
+index 2b1bd5d..aeefb28 100644
+--- a/src/allocator/Swapchain.cpp
++++ b/src/allocator/Swapchain.cpp
+@@ -51,8 +51,11 @@ bool Aquamarine::CSwapchain::reconfigure(const SSwapchainOptions& options_) {
+         return false;
+ 
+     options = options_;
+-    if (options.format == DRM_FORMAT_INVALID)
+-        options.format = buffers.at(0)->dmabuf().format;
++    if (options.format == DRM_FORMAT_INVALID) {
++        const auto dma = buffers.at(0)->dmabuf();
++        const auto shm = buffers.at(0)->shm();
++        options.format = dma.success ? dma.format : shm.format;
++    }
+ 
+     allocator->getBackend()->log(AQ_LOG_DEBUG,
+                                  std::format("Swapchain: Reconfigured a swapchain to {} {} of length {}", options.size, fourccToName(options.format), options.length));
+@@ -63,12 +66,31 @@ SP<IBuffer> Aquamarine::CSwapchain::next(int* age) {
+     if (!allocator || options.length <= 0)
+         return nullptr;
+ 
+-    lastAcquired = (lastAcquired + 1) % options.length;
+-
+-    if (age)
+-        *age = options.length; // we always just rotate
++    // A nested Wayland compositor owns a submitted wl_buffer until it sends
++    // wl_buffer.release.  Reusing such a buffer for a new render pass races the
++    // parent compositor and presents stale or partially-updated pixels.  This
++    // matters especially for SHM, where the renderer writes directly into the
++    // memory Weston is still reading.
++    //
++    // Backends mark their in-flight buffers with IBuffer::lock().  Walk the
++    // whole ring and acquire only a buffer that the backend has released.
++    // Returning nullptr when the ring is exhausted lets the pending frame
++    // callback wake the renderer once the parent has consumed a buffer.
++    for (size_t i = 0; i < options.length; ++i) {
++        const auto candidate = (lastAcquired + 1 + i) % options.length;
++        if (buffers.at(candidate)->locked())
++            continue;
++
++        lastAcquired = candidate;
++
++        if (age)
++            *age = options.length; // we always just rotate
++
++        return buffers.at(lastAcquired);
++    }
+ 
+-    return buffers.at(lastAcquired);
++    allocator->getBackend()->log(AQ_LOG_TRACE, "Swapchain: all buffers are still owned by the backend");
++    return nullptr;
+ }
+ 
+ bool Aquamarine::CSwapchain::fullReconfigure(const SSwapchainOptions& options_) {
+@@ -83,9 +105,14 @@ bool Aquamarine::CSwapchain::fullReconfigure(const SSwapchainOptions& options_)
+             allocator->getBackend()->log(AQ_LOG_ERROR, "Swapchain: Failed acquiring a buffer");
+             return false;
+         }
+-        allocator->getBackend()->log(AQ_LOG_TRACE,
+-                                     std::format("Swapchain: Acquired a buffer with format {} and modifier 0x{:x} : {}", fourccToName(buf->dmabuf().format), buf->dmabuf().modifier,
+-                                                 drmModifierToName(buf->dmabuf().modifier)));
++        const auto dma = buf->dmabuf();
++        const auto shm = buf->shm();
++        if (dma.success)
++            allocator->getBackend()->log(AQ_LOG_TRACE,
++                                         std::format("Swapchain: Acquired a buffer with format {} and modifier 0x{:x} : {}", fourccToName(dma.format), dma.modifier,
++                                                     drmModifierToName(dma.modifier)));
++        else
++            allocator->getBackend()->log(AQ_LOG_TRACE, std::format("Swapchain: Acquired a SHM buffer with format {}", fourccToName(shm.format)));
+         bfs.emplace_back(buf);
+     }
+ 
+@@ -104,8 +131,9 @@ bool Aquamarine::CSwapchain::resize(size_t newSize) {
+         }
+     } else {
+         while (buffers.size() < newSize) {
+-            auto buf =
+-                allocator->acquire(SAllocatorBufferParams{.size = options.size, .format = options.format, .scanout = options.scanout, .cursor = options.cursor}, self.lock());
++            auto buf = allocator->acquire(
++                SAllocatorBufferParams{.size = options.size, .format = options.format, .scanout = options.scanout, .cursor = options.cursor, .multigpu = options.multigpu},
++                self.lock());
+             if (!buf) {
+                 allocator->getBackend()->log(AQ_LOG_ERROR, "Swapchain: Failed acquiring a buffer");
+                 return false;
+diff --git a/src/allocator/Vulkan.cpp b/src/allocator/Vulkan.cpp
+new file mode 100644
+index 0000000..c8e5190
+--- /dev/null
++++ b/src/allocator/Vulkan.cpp
+@@ -0,0 +1,284 @@
++#include <aquamarine/allocator/Vulkan.hpp>
++#include <aquamarine/backend/Backend.hpp>
++
++#include <drm_fourcc.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <format>
++#include <vector>
++
++using namespace Aquamarine;
++using namespace Hyprutils::Memory;
++#define SP CSharedPointer
++
++static constexpr VkImageUsageFlags IMAGE_USAGE = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
++                                                VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++
++Aquamarine::CVulkanBuffer::CVulkanBuffer(const SAllocatorBufferParams& params, CWeakPointer<CVulkanAllocator> allocator_) : allocator(allocator_) {
++    if (!allocator || params.size.x <= 0 || params.size.y <= 0)
++        return;
++
++    const uint32_t format = params.format == DRM_FORMAT_INVALID ? DRM_FORMAT_XRGB8888 : params.format;
++    if (format != DRM_FORMAT_XRGB8888 && format != DRM_FORMAT_ARGB8888) {
++        allocator->backend->log(AQ_LOG_ERROR, std::format("Vulkan allocator: unsupported DRM format 0x{:x}", format));
++        return;
++    }
++
++    VkExternalMemoryImageCreateInfo externalImage{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
++    externalImage.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++
++    VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
++    imageInfo.pNext         = &externalImage;
++    imageInfo.imageType     = VK_IMAGE_TYPE_2D;
++    imageInfo.format        = VK_FORMAT_B8G8R8A8_UNORM;
++    imageInfo.extent        = {static_cast<uint32_t>(params.size.x), static_cast<uint32_t>(params.size.y), 1};
++    imageInfo.mipLevels     = 1;
++    imageInfo.arrayLayers   = 1;
++    imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
++    imageInfo.tiling        = VK_IMAGE_TILING_LINEAR;
++    imageInfo.usage         = IMAGE_USAGE;
++    imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
++    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++
++    VkResult result = vkCreateImage(allocator->device, &imageInfo, nullptr, &image);
++    if (result != VK_SUCCESS) {
++        allocator->backend->log(AQ_LOG_ERROR, std::format("Vulkan allocator: vkCreateImage failed: {}", static_cast<int>(result)));
++        return;
++    }
++
++    VkMemoryRequirements requirements{};
++    vkGetImageMemoryRequirements(allocator->device, image, &requirements);
++    VkPhysicalDeviceMemoryProperties memoryProperties{};
++    vkGetPhysicalDeviceMemoryProperties(allocator->physical, &memoryProperties);
++
++    uint32_t memoryType = UINT32_MAX;
++    for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
++        if (!(requirements.memoryTypeBits & (1U << i)))
++            continue;
++        if (memoryProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
++            memoryType = i;
++            break;
++        }
++    }
++    if (memoryType == UINT32_MAX) {
++        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
++            if (requirements.memoryTypeBits & (1U << i)) {
++                memoryType = i;
++                break;
++            }
++        }
++    }
++    if (memoryType == UINT32_MAX) {
++        allocator->backend->log(AQ_LOG_ERROR, "Vulkan allocator: no compatible memory type");
++        return;
++    }
++
++    VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
++    dedicated.image = image;
++    VkExportMemoryAllocateInfo exportInfo{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
++    exportInfo.pNext       = &dedicated;
++    exportInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
++    allocation.pNext           = &exportInfo;
++    allocation.allocationSize  = requirements.size;
++    allocation.memoryTypeIndex = memoryType;
++
++    result = vkAllocateMemory(allocator->device, &allocation, nullptr, &memory);
++    if (result != VK_SUCCESS) {
++        allocator->backend->log(AQ_LOG_ERROR, std::format("Vulkan allocator: vkAllocateMemory failed: {}", static_cast<int>(result)));
++        return;
++    }
++    result = vkBindImageMemory(allocator->device, image, memory, 0);
++    if (result != VK_SUCCESS) {
++        allocator->backend->log(AQ_LOG_ERROR, std::format("Vulkan allocator: vkBindImageMemory failed: {}", static_cast<int>(result)));
++        return;
++    }
++
++    VkImageSubresource subresource{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
++    VkSubresourceLayout layout{};
++    vkGetImageSubresourceLayout(allocator->device, image, &subresource, &layout);
++    if (layout.offset > UINT32_MAX || layout.rowPitch > UINT32_MAX) {
++        allocator->backend->log(AQ_LOG_ERROR, "Vulkan allocator: exported plane layout exceeds DMA-BUF protocol limits");
++        return;
++    }
++
++    VkMemoryGetFdInfoKHR fdInfo{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
++    fdInfo.memory     = memory;
++    fdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    int dmaFD         = -1;
++    result            = allocator->getMemoryFd(allocator->device, &fdInfo, &dmaFD);
++    if (result != VK_SUCCESS || dmaFD < 0) {
++        allocator->backend->log(AQ_LOG_ERROR, std::format("Vulkan allocator: vkGetMemoryFdKHR failed: {}", static_cast<int>(result)));
++        return;
++    }
++
++    attrs.success    = true;
++    attrs.size       = params.size;
++    attrs.format     = format;
++    attrs.modifier   = DRM_FORMAT_MOD_LINEAR;
++    attrs.planes     = 1;
++    attrs.fds[0]     = dmaFD;
++    attrs.offsets[0] = static_cast<uint32_t>(layout.offset);
++    attrs.strides[0] = static_cast<uint32_t>(layout.rowPitch);
++    size             = params.size;
++    opaque           = format == DRM_FORMAT_XRGB8888;
++
++    allocator->backend->log(AQ_LOG_DEBUG,
++                            std::format("Vulkan allocator: exported {}x{} linear image, stride {}, fd {}", params.size.x, params.size.y, attrs.strides[0], dmaFD));
++}
++
++Aquamarine::CVulkanBuffer::~CVulkanBuffer() {
++    events.destroy.emit();
++    if (attrs.fds[0] >= 0)
++        close(attrs.fds[0]);
++    if (allocator) {
++        if (image)
++            vkDestroyImage(allocator->device, image, nullptr);
++        if (memory)
++            vkFreeMemory(allocator->device, memory, nullptr);
++    }
++}
++
++eBufferCapability Aquamarine::CVulkanBuffer::caps() {
++    return BUFFER_CAPABILITY_NONE;
++}
++
++eBufferType Aquamarine::CVulkanBuffer::type() {
++    return BUFFER_TYPE_DMABUF;
++}
++
++void Aquamarine::CVulkanBuffer::update(const Hyprutils::Math::CRegion& damage) {}
++
++bool Aquamarine::CVulkanBuffer::isSynchronous() {
++    return false;
++}
++
++bool Aquamarine::CVulkanBuffer::good() {
++    return attrs.success && attrs.fds[0] >= 0 && image && memory;
++}
++
++SDMABUFAttrs Aquamarine::CVulkanBuffer::dmabuf() {
++    return attrs;
++}
++
++Aquamarine::CVulkanAllocator::CVulkanAllocator(CWeakPointer<CBackend> backend_) : backend(backend_) {}
++
++bool Aquamarine::CVulkanAllocator::init() {
++    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
++    app.pApplicationName = "Aquamarine Android DMA-BUF allocator";
++    app.apiVersion       = VK_API_VERSION_1_1;
++    VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
++    instanceInfo.pApplicationInfo = &app;
++    VkResult result = vkCreateInstance(&instanceInfo, nullptr, &instance);
++    if (result != VK_SUCCESS) {
++        backend->log(AQ_LOG_ERROR, std::format("Vulkan allocator: vkCreateInstance failed: {}", static_cast<int>(result)));
++        return false;
++    }
++
++    uint32_t physicalCount = 0;
++    result = vkEnumeratePhysicalDevices(instance, &physicalCount, nullptr);
++    if (result != VK_SUCCESS || !physicalCount) {
++        backend->log(AQ_LOG_ERROR, "Vulkan allocator: no physical device");
++        return false;
++    }
++    std::vector<VkPhysicalDevice> physicals(physicalCount);
++    result   = vkEnumeratePhysicalDevices(instance, &physicalCount, physicals.data());
++    physical = result == VK_SUCCESS ? physicals[0] : VK_NULL_HANDLE;
++    if (!physical)
++        return false;
++
++    uint32_t familyCount = 0;
++    vkGetPhysicalDeviceQueueFamilyProperties(physical, &familyCount, nullptr);
++    std::vector<VkQueueFamilyProperties> families(familyCount);
++    vkGetPhysicalDeviceQueueFamilyProperties(physical, &familyCount, families.data());
++    for (uint32_t i = 0; i < familyCount; ++i) {
++        if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
++            queueFamily = i;
++            break;
++        }
++    }
++    if (queueFamily == UINT32_MAX) {
++        backend->log(AQ_LOG_ERROR, "Vulkan allocator: no graphics queue family");
++        return false;
++    }
++
++    VkPhysicalDeviceExternalImageFormatInfo externalFormat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO};
++    externalFormat.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    VkPhysicalDeviceImageFormatInfo2 formatInfo{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2};
++    formatInfo.pNext  = &externalFormat;
++    formatInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
++    formatInfo.type   = VK_IMAGE_TYPE_2D;
++    formatInfo.tiling = VK_IMAGE_TILING_LINEAR;
++    formatInfo.usage  = IMAGE_USAGE;
++    VkExternalImageFormatProperties externalProperties{VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES};
++    VkImageFormatProperties2 properties{VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2};
++    properties.pNext = &externalProperties;
++    result = vkGetPhysicalDeviceImageFormatProperties2(physical, &formatInfo, &properties);
++    if (result != VK_SUCCESS || !(externalProperties.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT)) {
++        backend->log(AQ_LOG_ERROR, "Vulkan allocator: Turnip cannot export a linear BGRA color image");
++        return false;
++    }
++
++    float priority = 1.F;
++    VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
++    queueInfo.queueFamilyIndex = queueFamily;
++    queueInfo.queueCount       = 1;
++    queueInfo.pQueuePriorities = &priority;
++    const char* extensions[]   = {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME};
++    VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
++    deviceInfo.queueCreateInfoCount    = 1;
++    deviceInfo.pQueueCreateInfos       = &queueInfo;
++    deviceInfo.enabledExtensionCount   = 1;
++    deviceInfo.ppEnabledExtensionNames = extensions;
++    result = vkCreateDevice(physical, &deviceInfo, nullptr, &device);
++    if (result != VK_SUCCESS) {
++        backend->log(AQ_LOG_ERROR, std::format("Vulkan allocator: vkCreateDevice failed: {}", static_cast<int>(result)));
++        return false;
++    }
++
++    getMemoryFd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(device, "vkGetMemoryFdKHR"));
++    if (!getMemoryFd) {
++        backend->log(AQ_LOG_ERROR, "Vulkan allocator: vkGetMemoryFdKHR is unavailable");
++        return false;
++    }
++
++    VkPhysicalDeviceProperties deviceProperties{};
++    vkGetPhysicalDeviceProperties(physical, &deviceProperties);
++    backend->log(AQ_LOG_DEBUG, std::format("Vulkan allocator: using {}", deviceProperties.deviceName));
++    return true;
++}
++
++Aquamarine::CVulkanAllocator::~CVulkanAllocator() {
++    if (device) {
++        vkDeviceWaitIdle(device);
++        vkDestroyDevice(device, nullptr);
++    }
++    if (instance)
++        vkDestroyInstance(instance, nullptr);
++}
++
++SP<CVulkanAllocator> Aquamarine::CVulkanAllocator::create(CWeakPointer<CBackend> backend_) {
++    auto allocator = SP<CVulkanAllocator>(new CVulkanAllocator(backend_));
++    if (!allocator->init())
++        return nullptr;
++    allocator->self = allocator;
++    return allocator;
++}
++
++SP<IBuffer> Aquamarine::CVulkanAllocator::acquire(const SAllocatorBufferParams& params, SP<CSwapchain> swapchain_) {
++    auto buffer = SP<IBuffer>(new CVulkanBuffer(params, self));
++    return buffer->good() ? buffer : nullptr;
++}
++
++SP<CBackend> Aquamarine::CVulkanAllocator::getBackend() {
++    return backend.lock();
++}
++
++int Aquamarine::CVulkanAllocator::drmFD() {
++    return -1;
++}
++
++eAllocatorType Aquamarine::CVulkanAllocator::type() {
++    return AQ_ALLOCATOR_TYPE_VULKAN;
++}
+diff --git a/src/backend/Backend.cpp b/src/backend/Backend.cpp
+index dbd7147..5296848 100644
+--- a/src/backend/Backend.cpp
++++ b/src/backend/Backend.cpp
+@@ -4,7 +4,11 @@
+ #include <aquamarine/backend/DRM.hpp>
+ #include <aquamarine/backend/Null.hpp>
+ #include <aquamarine/allocator/GBM.hpp>
++#include <aquamarine/allocator/SHM.hpp>
++#include <aquamarine/allocator/DMAHeap.hpp>
++#include <aquamarine/allocator/Vulkan.hpp>
+ #include <hyprutils/os/FileDescriptor.hpp>
++#include <algorithm>
+ #include <ranges>
+ #include <sys/timerfd.h>
+ #include <ctime>
+@@ -14,6 +18,7 @@
+ #include <unistd.h>
+ 
+ #include "Logger.hpp"
++#include "Shared.hpp"
+ 
+ using namespace Hyprutils::Memory;
+ using namespace Hyprutils::OS;
+@@ -173,6 +178,22 @@ bool Aquamarine::CBackend::start() {
+         }
+     }
+ 
++    // Android application sandboxes do not expose a DRM render node, but they
++    // do expose the system DMA heap. Use it when the parent compositor accepts
++    // linear DMA-BUFs, keeping SHM as the reliable fallback.
++    if (!primaryAllocator) {
++        const bool hasWayland = std::ranges::any_of(implementations, [](const auto& impl) { return impl->type() == AQ_BACKEND_WAYLAND; });
++        const bool hasLinearDmabuf = std::ranges::any_of(implementations, [](const auto& impl) {
++            return impl->type() == AQ_BACKEND_WAYLAND && static_cast<CWaylandBackend*>(impl.get())->supportsLinearDmabuf();
++        });
++        if (hasWayland && hasLinearDmabuf && envEnabled("AQ_ANDROID_DMABUF_VULKAN"))
++            primaryAllocator = CVulkanAllocator::create(self);
++        if (hasWayland && hasLinearDmabuf && !primaryAllocator && envEnabled("AQ_ANDROID_DMABUF_HEAP"))
++            primaryAllocator = CDMAHeapAllocator::create(self);
++        if (hasWayland && !primaryAllocator)
++            primaryAllocator = CSHMAllocator::create(self);
++    }
++
+     if (!primaryAllocator && (implementations.empty() || implementations.at(0)->type() != AQ_BACKEND_NULL)) {
+         log(AQ_LOG_CRITICAL, "Cannot open backend: no allocator available");
+         return false;
+diff --git a/src/backend/FrameScheduler.cpp b/src/backend/FrameScheduler.cpp
+index b71278e..0de0326 100644
+--- a/src/backend/FrameScheduler.cpp
++++ b/src/backend/FrameScheduler.cpp
+@@ -11,9 +11,10 @@ void CFrameScheduler::onFrameComplete() {
+ }
+ 
+ void CFrameScheduler::invalidate() {
+-    m_pending        = false;
+-    m_frameRunning   = false;
+-    m_frameScheduled = false;
++    m_pending             = false;
++    m_frameRunning        = false;
++    m_frameScheduled      = false;
++    m_rescheduleRequested = false;
+ }
+ 
+ bool CFrameScheduler::frameInFlight() const {
+@@ -40,10 +41,27 @@ void CFrameScheduler::setFrameRunning(bool v) {
+     m_frameRunning = v;
+ }
+ 
++void CFrameScheduler::requestReschedule() {
++    m_rescheduleRequested = true;
++}
++
+ CFrameRunningGuard::CFrameRunningGuard(CFrameScheduler& s) : m_s(s) {
+     m_s.setFrameRunning(true);
+ }
+ 
+ CFrameRunningGuard::~CFrameRunningGuard() {
+     m_s.setFrameRunning(false);
++
++    if (!m_s.m_rescheduleRequested)
++        return;
++
++    m_s.m_rescheduleRequested = false;
++
++    // Always replay the request after the running callback returns.  A render
++    // submitted from inside that callback makes m_pending true, but commit()
++    // also clears IOutput::needsFrame.  Dropping the replay merely because a
++    // host callback is pending therefore loses the damage that arrived during
++    // the render.  The output's scheduleFrame() restores needsFrame and will
++    // defer the actual emission until the pending callback completes.
++    m_s.rescheduleNeeded.emit();
+ }
+diff --git a/src/backend/Wayland.cpp b/src/backend/Wayland.cpp
+index 893ce26..049c2fe 100644
+--- a/src/backend/Wayland.cpp
++++ b/src/backend/Wayland.cpp
+@@ -4,9 +4,12 @@
+ #include <xdg-shell.hpp>
+ #include "Shared.hpp"
+ #include "FormatUtils.hpp"
++#include <chrono>
++#include <cstdlib>
+ #include <cstring>
+ #include <xf86drm.h>
+ #include <gbm.h>
++#include <GL/gl.h>
+ #include <fcntl.h>
+ #include <sys/mman.h>
+ #include <unistd.h>
+@@ -16,6 +19,19 @@ using namespace Hyprutils::Memory;
+ using namespace Hyprutils::Math;
+ #define SP CSharedPointer
+ 
++static uint32_t nestedRefreshRate() {
++    const auto value = getenv("AQ_WAYLAND_REFRESH_MHZ");
++    if (!value)
++        return 60000;
++
++    char* end = nullptr;
++    errno     = 0;
++    const auto parsed = std::strtoul(value, &end, 10);
++    if (errno || end == value || *end != '\0' || parsed < 30000 || parsed > 240000)
++        return 60000;
++    return parsed;
++}
++
+ static std::pair<int, std::string> openExclusiveShm() {
+     // Only absolute paths can be shared across different shm_open() calls
+     srand(time(nullptr));
+@@ -116,23 +132,27 @@ bool Aquamarine::CWaylandBackend::start() {
+         const std::string NAME = name;
+ 
+         if (NAME == "wl_seat") {
+-            TRACE(backend->log(AQ_LOG_TRACE, std::format("  > binding to global: {} (version {}) with id {}", name, 9, id)));
+-            waylandState.seat = makeShared<CCWlSeat>((wl_proxy*)wl_registry_bind((wl_registry*)waylandState.registry->resource(), id, &wl_seat_interface, 9));
++            const auto bindVersion = std::min(version, 9U);
++            TRACE(backend->log(AQ_LOG_TRACE, std::format("  > binding to global: {} (version {}) with id {}", name, bindVersion, id)));
++            waylandState.seat = makeShared<CCWlSeat>((wl_proxy*)wl_registry_bind((wl_registry*)waylandState.registry->resource(), id, &wl_seat_interface, bindVersion));
+             initSeat();
+         } else if (NAME == "xdg_wm_base") {
+-            TRACE(backend->log(AQ_LOG_TRACE, std::format("  > binding to global: {} (version {}) with id {}", name, 6, id)));
+-            waylandState.xdg = makeShared<CCXdgWmBase>((wl_proxy*)wl_registry_bind((wl_registry*)waylandState.registry->resource(), id, &xdg_wm_base_interface, 6));
++            const auto bindVersion = std::min(version, 6U);
++            TRACE(backend->log(AQ_LOG_TRACE, std::format("  > binding to global: {} (version {}) with id {}", name, bindVersion, id)));
++            waylandState.xdg = makeShared<CCXdgWmBase>((wl_proxy*)wl_registry_bind((wl_registry*)waylandState.registry->resource(), id, &xdg_wm_base_interface, bindVersion));
+             initShell();
+         } else if (NAME == "wl_compositor") {
+-            TRACE(backend->log(AQ_LOG_TRACE, std::format("  > binding to global: {} (version {}) with id {}", name, 6, id)));
+-            waylandState.compositor = makeShared<CCWlCompositor>((wl_proxy*)wl_registry_bind((wl_registry*)waylandState.registry->resource(), id, &wl_compositor_interface, 6));
++            const auto bindVersion = std::min(version, 6U);
++            TRACE(backend->log(AQ_LOG_TRACE, std::format("  > binding to global: {} (version {}) with id {}", name, bindVersion, id)));
++            waylandState.compositor = makeShared<CCWlCompositor>((wl_proxy*)wl_registry_bind((wl_registry*)waylandState.registry->resource(), id, &wl_compositor_interface, bindVersion));
+         } else if (NAME == "wl_shm") {
+             TRACE(backend->log(AQ_LOG_TRACE, std::format("  > binding to global: {} (version {}) with id {}", name, 1, id)));
+             waylandState.shm = makeShared<CCWlShm>((wl_proxy*)wl_registry_bind((wl_registry*)waylandState.registry->resource(), id, &wl_shm_interface, 1));
+         } else if (NAME == "zwp_linux_dmabuf_v1") {
+-            TRACE(backend->log(AQ_LOG_TRACE, std::format("  > binding to global: {} (version {}) with id {}", name, 4, id)));
+-            waylandState.dmabuf =
+-                makeShared<CCZwpLinuxDmabufV1>((wl_proxy*)wl_registry_bind((wl_registry*)waylandState.registry->resource(), id, &zwp_linux_dmabuf_v1_interface, 4));
++            const auto bindVersion = std::min(version, 4U);
++            TRACE(backend->log(AQ_LOG_TRACE, std::format("  > binding to global: {} (version {}) with id {}", name, bindVersion, id)));
++            waylandState.dmabuf = makeShared<CCZwpLinuxDmabufV1>(
++                (wl_proxy*)wl_registry_bind((wl_registry*)waylandState.registry->resource(), id, &zwp_linux_dmabuf_v1_interface, bindVersion));
+             if (!initDmabuf()) {
+                 backend->log(AQ_LOG_ERROR, "Wayland backend cannot start: zwp_linux_dmabuf_v1 init failed");
+                 waylandState.dmabufFailed = true;
+@@ -143,7 +163,7 @@ bool Aquamarine::CWaylandBackend::start() {
+ 
+     wl_display_roundtrip(waylandState.display);
+ 
+-    if (!waylandState.xdg || !waylandState.compositor || !waylandState.seat || !waylandState.dmabuf || waylandState.dmabufFailed || !waylandState.shm) {
++    if (!waylandState.xdg || !waylandState.compositor || !waylandState.seat || !waylandState.shm) {
+         backend->log(AQ_LOG_ERROR, "Wayland backend cannot start: Missing protocols");
+         return false;
+     }
+@@ -275,25 +295,7 @@ Aquamarine::CWaylandPointer::CWaylandPointer(SP<CCWlPointer> pointer_, Hyprutils
+ 
+     backend->backend->log(AQ_LOG_DEBUG, "New wayland pointer wl_pointer");
+ 
+-    pointer->setMotion([this](CCWlPointer* r, uint32_t serial, wl_fixed_t x, wl_fixed_t y) {
+-        const auto STATE = backend->focusedOutput->state->state();
+-
+-        if (!backend->focusedOutput || (!STATE.mode && !STATE.customMode))
+-            return;
+-
+-        const Vector2D size = STATE.customMode ? STATE.customMode->pixelSize : STATE.mode->pixelSize;
+-
+-        Vector2D       local = {wl_fixed_to_double(x), wl_fixed_to_double(y)};
+-        local                = local / size;
+-
+-        timespec now;
+-        clock_gettime(CLOCK_MONOTONIC, &now);
+-
+-        events.warp.emit(SWarpEvent{
+-            .timeMs   = (uint32_t)(now.tv_sec * 1000 + now.tv_nsec / 1000000),
+-            .absolute = local,
+-        });
+-    });
++    pointer->setMotion([this](CCWlPointer* r, uint32_t timeMs, wl_fixed_t x, wl_fixed_t y) { emitWarp(timeMs, x, y); });
+ 
+     pointer->setEnter([this](CCWlPointer* r, uint32_t serial, wl_proxy* surface, wl_fixed_t x, wl_fixed_t y) {
+         backend->lastEnterSerial = serial;
+@@ -305,6 +307,7 @@ Aquamarine::CWaylandPointer::CWaylandPointer(SP<CCWlPointer> pointer_, Hyprutils
+             backend->focusedOutput = o;
+             backend->backend->log(AQ_LOG_DEBUG, std::format("[wayland] focus changed: {}", o->name));
+             o->onEnter(pointer, serial);
++            emitWarp(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(), x, y);
+             break;
+         }
+     });
+@@ -315,6 +318,9 @@ Aquamarine::CWaylandPointer::CWaylandPointer(SP<CCWlPointer> pointer_, Hyprutils
+                 continue;
+ 
+             o->cursorState.serial = 0;
++            if (backend->focusedOutput.lock() == o)
++                backend->focusedOutput = {};
++            break;
+         }
+     });
+ 
+@@ -337,6 +343,18 @@ Aquamarine::CWaylandPointer::CWaylandPointer(SP<CCWlPointer> pointer_, Hyprutils
+     pointer->setFrame([this](CCWlPointer* r) { events.frame.emit(); });
+ }
+ 
++void Aquamarine::CWaylandPointer::emitWarp(uint32_t timeMs, wl_fixed_t x, wl_fixed_t y) {
++    const auto output = backend->focusedOutput.lock();
++    if (!output || output->waylandState.surfaceSize.x <= 0 || output->waylandState.surfaceSize.y <= 0)
++        return;
++
++    events.warp.emit(SWarpEvent{
++        .timeMs   = timeMs,
++        .absolute = Vector2D{wl_fixed_to_double(x), wl_fixed_to_double(y)} / output->waylandState.surfaceSize,
++        .output   = SP<IOutput>(output),
++    });
++}
++
+ Aquamarine::CWaylandPointer::~CWaylandPointer() {
+     ;
+ }
+@@ -369,6 +387,32 @@ void Aquamarine::CWaylandBackend::initShell() {
+ }
+ 
+ bool Aquamarine::CWaylandBackend::initDmabuf() {
++    // linux-dmabuf v3 predates feedback objects but still advertises formats
++    // and modifiers directly on the global. Weston-on-Termux:X11 exposes v3.
++    if (waylandState.dmabuf->version() < 4) {
++        auto addFormat = [this](uint32_t format, uint64_t modifier) {
++            auto it = std::ranges::find_if(dmabufFormats, [format](const auto& candidate) { return candidate.drmFormat == format; });
++            if (it == dmabufFormats.end()) {
++                dmabufFormats.emplace_back(SDRMFormat{.drmFormat = format, .modifiers = {modifier}});
++                return;
++            }
++            if (std::ranges::find(it->modifiers, modifier) == it->modifiers.end())
++                it->modifiers.emplace_back(modifier);
++        };
++
++        waylandState.dmabuf->setFormat([this, addFormat](CCZwpLinuxDmabufV1* r, uint32_t format) {
++            addFormat(format, DRM_FORMAT_MOD_INVALID);
++        });
++        waylandState.dmabuf->setModifier(
++            [this, addFormat](CCZwpLinuxDmabufV1* r, uint32_t format, uint32_t modifierHi, uint32_t modifierLo) {
++                addFormat(format, (static_cast<uint64_t>(modifierHi) << 32U) | modifierLo);
++            });
++
++        wl_display_roundtrip(waylandState.display);
++        backend->log(AQ_LOG_DEBUG, std::format("zwp_linux_dmabuf_v1: legacy v{} advertised {} formats", waylandState.dmabuf->version(), dmabufFormats.size()));
++        return !dmabufFormats.empty();
++    }
++
+     waylandState.dmabufFeedback = makeShared<CCZwpLinuxDmabufFeedbackV1>(waylandState.dmabuf->sendGetDefaultFeedback());
+     if (!waylandState.dmabufFeedback) {
+         backend->log(AQ_LOG_ERROR, "initDmabuf: failed to get default feedback");
+@@ -470,11 +514,43 @@ bool Aquamarine::CWaylandBackend::initDmabuf() {
+ }
+ 
+ std::vector<SDRMFormat> Aquamarine::CWaylandBackend::getRenderFormats() {
+-    return dmabufFormats;
++    if (!dmabufFormats.empty() && backend->primaryAllocator &&
++        (backend->primaryAllocator->type() == AQ_ALLOCATOR_TYPE_DMA_HEAP || backend->primaryAllocator->type() == AQ_ALLOCATOR_TYPE_VULKAN)) {
++        std::vector<SDRMFormat> linearFormats;
++        for (const auto& format : dmabufFormats) {
++            if (format.drmFormat != DRM_FORMAT_XRGB8888 && format.drmFormat != DRM_FORMAT_ARGB8888)
++                continue;
++            if (std::ranges::find(format.modifiers, DRM_FORMAT_MOD_LINEAR) != format.modifiers.end())
++                linearFormats.emplace_back(SDRMFormat{.drmFormat = format.drmFormat, .modifiers = {DRM_FORMAT_MOD_LINEAR}});
++        }
++        return linearFormats;
++    }
++    if (!dmabufFormats.empty() && backend->primaryAllocator && backend->primaryAllocator->type() != AQ_ALLOCATOR_TYPE_SHM)
++        return dmabufFormats;
++    return {SDRMFormat{.drmFormat = DRM_FORMAT_XRGB8888, .modifiers = {DRM_FORMAT_INVALID}},
++            SDRMFormat{.drmFormat = DRM_FORMAT_ARGB8888, .modifiers = {DRM_FORMAT_INVALID}}};
++}
++
++bool Aquamarine::CWaylandBackend::supportsLinearDmabuf() const {
++    if (!waylandState.dmabuf || waylandState.dmabufFailed)
++        return false;
++
++    return std::ranges::any_of(dmabufFormats, [](const auto& format) {
++        if (format.drmFormat != DRM_FORMAT_XRGB8888 && format.drmFormat != DRM_FORMAT_ARGB8888)
++            return false;
++        return std::ranges::find(format.modifiers, DRM_FORMAT_MOD_LINEAR) != format.modifiers.end();
++    });
++}
++
++bool Aquamarine::CWaylandBackend::supportsDmabuf(uint32_t format, uint64_t modifier) const {
++    const auto found = std::ranges::find_if(dmabufFormats, [format](const auto& candidate) { return candidate.drmFormat == format; });
++    if (found == dmabufFormats.end())
++        return false;
++    return std::ranges::find(found->modifiers, modifier) != found->modifiers.end();
+ }
+ 
+ std::vector<SDRMFormat> Aquamarine::CWaylandBackend::getCursorFormats() {
+-    return dmabufFormats;
++    return getRenderFormats();
+ }
+ 
+ SP<IAllocator> Aquamarine::CWaylandBackend::preferredAllocator() {
+@@ -492,9 +568,16 @@ Hyprutils::Memory::CWeakPointer<IBackendImplementation> Aquamarine::CWaylandBack
+ Aquamarine::CWaylandOutput::CWaylandOutput(const std::string& name_, Hyprutils::Memory::CWeakPointer<CWaylandBackend> backend_) : backend(backend_) {
+     name = name_;
+ 
++    // xdg-shell does not advertise output modes. Publish the Android target
++    // cadence explicitly so the nested compositor does not assume 60 Hz.
++    modes.emplace_back(SP<SOutputMode>(new SOutputMode(Vector2D{1280, 720}, nestedRefreshRate(), true)));
++
+     // The scheduler's frameReady signal drives the public events.frame on this output.
+     frameReadyListener = sched.frameReady.listen([this]() { events.frame.emit(); });
+ 
++    // a scheduleFrame mid frame, reschedule one more.
++    rescheduleListener = sched.rescheduleNeeded.listen([this]() { scheduleFrame(AQ_SCHEDULE_NEEDS_FRAME); });
++
+     // Idle that emits the scheduled frame, fired via the core backend's idle queue
+     // (addIdleEvent), which the consumer's event loop pumps every iteration. Deliberately
+     // not the backend-local idleCallbacks vector: that only drains inside dispatchEvents,
+@@ -524,6 +607,23 @@ Aquamarine::CWaylandOutput::CWaylandOutput(const std::string& name_, Hyprutils::
+     waylandState.xdgSurface->setConfigure([this](CCXdgSurface* r, uint32_t serial) {
+         backend->backend->log(AQ_LOG_DEBUG, std::format("Output {}: configure surface with {}", name, serial));
+         r->sendAckConfigure(serial);
++        waylandState.configured = true;
++
++        // This callback can run before the backend's queued newOutput event.
++        // Defer publishing the configured size until the idle callbacks run:
++        // newOutput is already first in that queue, so Hyprland has installed
++        // its monitor listeners by the time it receives this state event.
++        const auto configureSize = waylandState.pendingConfigureSize;
++        backend->idleCallbacks.emplace_back([this, configureSize]() {
++            if (configureSize != Vector2D{})
++                events.state.emit(SStateEvent{.size = configureSize});
++
++            if (state->state().committed && !commit())
++                backend->backend->log(AQ_LOG_ERROR, std::format("Output {}: failed to replay state after configure", name));
++
++            needsFrame = true;
++            sched.frameReady.emit();
++        });
+     });
+ 
+     waylandState.xdgToplevel = makeShared<CCXdgToplevel>(waylandState.xdgSurface->sendGetToplevel());
+@@ -543,12 +643,10 @@ Aquamarine::CWaylandOutput::CWaylandOutput(const std::string& name_, Hyprutils::
+             w = 1280;
+             h = 720;
+         }
+-        events.state.emit(SStateEvent{.size = {w, h}});
+-        // Kick off the first frame synchronously: the consumer expects events.frame in
+-        // the same dispatch cycle as the toplevel configure. Deferring via scheduleFrame's
+-        // idle races the first commit and can leave the output blank until the next event.
+-        needsFrame = true;
+-        sched.frameReady.emit();
++        modes.front()->pixelSize = {w, h};
++        // The matching xdg_surface.configure carries the serial that must be
++        // acknowledged before the compositor is allowed to submit a buffer.
++        waylandState.pendingConfigureSize = {w, h};
+     });
+ 
+     waylandState.xdgToplevel->setClose([this](CCXdgToplevel* r) { destroy(); });
+@@ -562,6 +660,11 @@ Aquamarine::CWaylandOutput::CWaylandOutput(const std::string& name_, Hyprutils::
+     waylandState.surface->sendSetInputRegion(inputRegion.get());
+     waylandState.surface->sendAttach(nullptr, 0, 0);
+     waylandState.surface->sendCommit();
++    // createOutput() runs after the startup roundtrips. Flush this initial
++    // xdg commit immediately or an otherwise idle parent has nothing to read,
++    // never replies with configure, and Hyprland remains on its headless
++    // fallback output.
++    wl_display_flush(backend->waylandState.display);
+ 
+     inputRegion->sendDestroy();
+ 
+@@ -596,6 +699,9 @@ bool Aquamarine::CWaylandOutput::pendingIdleFrame() {
+ }
+ 
+ bool Aquamarine::CWaylandOutput::destroy() {
++    if (backend->focusedOutput.lock() == self.lock())
++        backend->focusedOutput = {};
++
+     events.destroy.emit();
+     waylandState.surface->sendAttach(nullptr, 0, 0);
+     waylandState.surface->sendCommit();
+@@ -610,6 +716,11 @@ bool Aquamarine::CWaylandOutput::test() {
+ }
+ 
+ bool Aquamarine::CWaylandOutput::commit() {
++    if (!waylandState.configured) {
++        backend->backend->log(AQ_LOG_WARNING, std::format("Output {}: deferring buffer commit until the initial xdg configure", name));
++        return true;
++    }
++
+     Vector2D pixelSize = {};
+ 
+     if (state->internalState.customMode)
+@@ -657,10 +768,22 @@ bool Aquamarine::CWaylandOutput::commit() {
+         return false;
+     }
+ 
+-    if (wlBuffer->pendingRelease)
+-        backend->backend->log(AQ_LOG_WARNING, std::format("Output {}: pending state has a non-released buffer??", name));
++    if (wlBuffer->pendingRelease) {
++        backend->backend->log(AQ_LOG_ERROR, std::format("Output {}: refusing to reuse a non-released buffer", name));
++        needsFrame = true;
++        return false;
++    }
+ 
+     wlBuffer->pendingRelease = true;
++    state->internalState.buffer->lock();
++    state->internalState.buffer->lockedByBackend = true;
++
++    // KGSL does not publish DRM implicit-sync fences for a DMA heap import in
++    // every driver path. This diagnostic/compatibility switch establishes the
++    // synchronization boundary before the parent compositor samples it. Once
++    // validated, this can be replaced by a native fence hand-off.
++    if (state->internalState.buffer->type() == BUFFER_TYPE_DMABUF && envEnabled("AQ_ANDROID_DMABUF_GLFINISH"))
++        glFinish();
+ 
+     waylandState.surface->sendAttach(wlBuffer->waylandState.buffer.get(), 0, 0);
+     waylandState.surface->sendDamageBuffer(0, 0, INT32_MAX, INT32_MAX);
+@@ -681,6 +804,7 @@ bool Aquamarine::CWaylandOutput::commit() {
+     }
+ 
+     waylandState.surface->sendCommit();
++    waylandState.surfaceSize = state->internalState.buffer->size;
+ 
+     // Flush immediately: commit() runs from the consumer's render path, outside
+     // dispatchEvents() (which flushes only at its top). Without this the buffer commit and
+@@ -702,10 +826,19 @@ SP<IBackendImplementation> Aquamarine::CWaylandOutput::getBackend() {
+ SP<CWaylandBuffer> Aquamarine::CWaylandOutput::wlBufferFromBuffer(SP<IBuffer> buffer) {
+     std::erase_if(backendState.buffers, [this](const auto& el) { return el.first.expired() || !swapchain->contains(el.first.lock()); });
+ 
+-    for (auto const& [k, v] : backendState.buffers) {
++    for (auto it = backendState.buffers.begin(); it != backendState.buffers.end(); ++it) {
++        const auto& [k, v] = *it;
+         if (k != buffer)
+             continue;
+ 
++        const auto presentation = buffer->presentationDMABUF();
++        const bool wantsPresentation = presentation.success && backend->waylandState.dmabuf &&
++            backend->supportsDmabuf(presentation.format, presentation.modifier);
++        if (wantsPresentation != v->usesPresentationDMABUF() && !v->pendingRelease) {
++            backendState.buffers.erase(it);
++            break;
++        }
++
+         return v;
+     }
+ 
+@@ -840,6 +973,12 @@ void Aquamarine::CWaylandOutput::scheduleFrame(const scheduleFrameReason reason)
+                                 std::format("CWaylandOutput::scheduleFrame: reason {}, needsFrame {}, canSchedule {}", (uint32_t)reason, needsFrame, sched.canSchedule())));
+     needsFrame = true;
+ 
++    // scheduled from inside a running frame, schedule it once the running frame is done.
++    if (sched.frameRunning()) {
++        sched.requestReschedule();
++        return;
++    }
++
+     if (!sched.canSchedule())
+         return;
+ 
+@@ -848,6 +987,60 @@ void Aquamarine::CWaylandOutput::scheduleFrame(const scheduleFrameReason reason)
+ }
+ 
+ Aquamarine::CWaylandBuffer::CWaylandBuffer(SP<IBuffer> buffer_, Hyprutils::Memory::CWeakPointer<CWaylandBackend> backend_) : buffer(buffer_), backend(backend_) {
++    const auto presentation = buffer->presentationDMABUF();
++    if (presentation.success && backend->waylandState.dmabuf && backend->supportsDmabuf(presentation.format, presentation.modifier)) {
++        auto params = makeShared<CCZwpLinuxBufferParamsV1>(backend->waylandState.dmabuf->sendCreateParams());
++        if (params) {
++            for (int i = 0; i < presentation.planes; ++i)
++                params->sendAdd(presentation.fds.at(i), i, presentation.offsets.at(i), presentation.strides.at(i), presentation.modifier >> 32,
++                                presentation.modifier & 0xFFFFFFFF);
++
++            waylandState.buffer = makeShared<CCWlBuffer>(
++                params->sendCreateImmed(presentation.size.x, presentation.size.y, presentation.format, (zwpLinuxBufferParamsV1Flags)0));
++            params->sendDestroy();
++
++            if (waylandState.buffer) {
++                presentationDMABUF = true;
++                buffer->setPresentationDMABUFActive(true);
++                backend->backend->log(AQ_LOG_DEBUG, std::format("WaylandBuffer: presenting GPU DMA-BUF format 0x{:08x}, modifier 0x{:016x}",
++                                                                presentation.format, presentation.modifier));
++                waylandState.buffer->setRelease([this](CCWlBuffer* r) {
++                    pendingRelease = false;
++                    if (const auto aqBuffer = buffer.lock(); aqBuffer && aqBuffer->lockedByBackend) {
++                        aqBuffer->lockedByBackend = false;
++                        aqBuffer->unlock();
++                    }
++                });
++                return;
++            }
++        }
++        backend->backend->log(AQ_LOG_WARNING, "WaylandBuffer: GPU presentation override failed, falling back to SHM");
++    }
++
++    const auto shm = buffer->shm();
++    if (shm.success) {
++        const int poolSize = shm.offset + static_cast<int64_t>(shm.stride) * static_cast<int64_t>(shm.size.y);
++        auto      pool     = makeShared<CCWlShmPool>(backend->waylandState.shm->sendCreatePool(shm.fd, poolSize));
++        if (!pool) {
++            backend->backend->log(AQ_LOG_ERROR, "WaylandBuffer: failed to create SHM pool");
++            return;
++        }
++
++        waylandState.buffer = makeShared<CCWlBuffer>(
++            pool->sendCreateBuffer(shm.offset, shm.size.x, shm.size.y, shm.stride, shmFormatFromDRM(shm.format)));
++        pool.reset();
++
++        if (waylandState.buffer)
++            waylandState.buffer->setRelease([this](CCWlBuffer* r) {
++                pendingRelease = false;
++                if (const auto aqBuffer = buffer.lock(); aqBuffer && aqBuffer->lockedByBackend) {
++                    aqBuffer->lockedByBackend = false;
++                    aqBuffer->unlock();
++                }
++            });
++        return;
++    }
++
+     auto params = makeShared<CCZwpLinuxBufferParamsV1>(backend->waylandState.dmabuf->sendCreateParams());
+ 
+     if (!params) {
+@@ -863,12 +1056,22 @@ Aquamarine::CWaylandBuffer::CWaylandBuffer(SP<IBuffer> buffer_, Hyprutils::Memor
+ 
+     waylandState.buffer = makeShared<CCWlBuffer>(params->sendCreateImmed(attrs.size.x, attrs.size.y, attrs.format, (zwpLinuxBufferParamsV1Flags)0));
+ 
+-    waylandState.buffer->setRelease([this](CCWlBuffer* r) { pendingRelease = false; });
++    waylandState.buffer->setRelease([this](CCWlBuffer* r) {
++        pendingRelease = false;
++        if (const auto aqBuffer = buffer.lock(); aqBuffer && aqBuffer->lockedByBackend) {
++            aqBuffer->lockedByBackend = false;
++            aqBuffer->unlock();
++        }
++    });
+ 
+     params->sendDestroy();
+ }
+ 
+ Aquamarine::CWaylandBuffer::~CWaylandBuffer() {
++    if (presentationDMABUF) {
++        if (const auto aqBuffer = buffer.lock())
++            aqBuffer->setPresentationDMABUFActive(false);
++    }
+     if (waylandState.buffer && waylandState.buffer->resource())
+         waylandState.buffer->sendDestroy();
+ }
+@@ -876,3 +1079,7 @@ Aquamarine::CWaylandBuffer::~CWaylandBuffer() {
+ bool Aquamarine::CWaylandBuffer::good() {
+     return waylandState.buffer && waylandState.buffer->resource();
+ }
++
++bool Aquamarine::CWaylandBuffer::usesPresentationDMABUF() const {
++    return presentationDMABUF;
++}
+diff --git a/src/backend/drm/DRM.cpp b/src/backend/drm/DRM.cpp
+index 888fef2..a584614 100644
+--- a/src/backend/drm/DRM.cpp
++++ b/src/backend/drm/DRM.cpp
+@@ -16,7 +16,6 @@
+ #include <cstring>
+ #include <filesystem>
+ #include <system_error>
+-#include <unordered_set>
+ #include <sys/mman.h>
+ #include <fcntl.h>
+ #include <unistd.h>
+@@ -36,6 +35,7 @@ extern "C" {
+ #include "Shared.hpp"
+ #include "hwdata.hpp"
+ #include "Renderer.hpp"
++#include "OutputTiming.hpp"
+ 
+ #include <hyprutils/utils/ScopeGuard.hpp>
+ using Hyprutils::Utils::CScopeGuard;
+@@ -410,7 +410,7 @@ void Aquamarine::CDRMBackend::restoreAfterVT() {
+     for (auto const& c : connectors) {
+         if (c->sched.frameInFlight() || c->sched.frameRunning()) {
+             backend->log(AQ_LOG_DEBUG, std::format("drm: Clearing stale page-flip state for {}", c->szName));
+-            c->sched.invalidate();
++            c->invalidateFrame();
+         }
+     }
+ 
+@@ -479,6 +479,8 @@ void Aquamarine::CDRMBackend::restoreAfterVT() {
+ 
+         if (c->crtc->pendingCursor)
+             data.cursorFB = c->crtc->pendingCursor;
++        else if (c->crtc->cursor)
++            data.cursorFB = c->crtc->cursor->front; // a consumed pending cursor lives on the plane
+ 
+         if (data.cursorFB && (data.cursorFB->dead || data.cursorFB->buffer->dmabuf().modifier == DRM_FORMAT_MOD_INVALID))
+             data.cursorFB = nullptr;
+@@ -666,7 +668,10 @@ bool Aquamarine::CDRMBackend::initMgpu() {
+         return false;
+     }
+ 
+-    rendererState.renderer = CDRMRenderer::attempt(backend.lock(), gpu->renderNodeFd >= 0 ? gpu->renderNodeFd : gpu->fd);
++    // virtio/virgl may expose a valid GBM device without advertising an
++    // EGL_DRM_DEVICE_FILE_EXT string. Use the allocator-backed GBM platform
++    // so the renderer is tied directly to the DRM fd in that case.
++    rendererState.renderer = CDRMRenderer::attempt(backend.lock(), newAllocator);
+ 
+     if (!rendererState.renderer) {
+         backend->log(AQ_LOG_ERROR, "drm: initMgpu: no renderer");
+@@ -760,7 +765,7 @@ void Aquamarine::CDRMBackend::recheckCRTCs() {
+         // disabled outputs release their CRTCs so active outputs get priority
+         if (c->crtc && c->status == DRM_MODE_CONNECTED && c->output && !c->output->enabledState) {
+             backend->log(AQ_LOG_DEBUG, std::format("drm: {} is disabled, releasing crtc {}", c->szName, c->crtc->id));
+-            c->crtc.reset();
++            c->setCRTC(nullptr);
+         }
+ 
+         if (c->crtc && c->status == DRM_MODE_CONNECTED) {
+@@ -812,7 +817,7 @@ void Aquamarine::CDRMBackend::recheckCRTCs() {
+ 
+             backend->log(AQ_LOG_DEBUG,
+                          std::format("drm: connected slot {} crtc {} assigned to {}{}", i, crtc->id, c->szName, c->crtc ? std::format(" (old {})", c->crtc->id) : ""));
+-            c->crtc  = crtc;
++            c->setCRTC(crtc);
+             assigned = true;
+             changed.emplace_back(c);
+             std::erase(recheck, c);
+@@ -842,7 +847,7 @@ void Aquamarine::CDRMBackend::recheckCRTCs() {
+                 continue;
+ 
+             backend->log(AQ_LOG_DEBUG, std::format("drm: backup slot {} crtc {} assigned to disabled {}", i, crtcs.at(i)->id, c->szName));
+-            c->crtc = crtcs.at(i);
++            c->setCRTC(crtcs.at(i));
+             std::erase(recheck, c);
+             break;
+         }
+@@ -854,7 +859,7 @@ void Aquamarine::CDRMBackend::recheckCRTCs() {
+ 
+         if (c->crtc)
+             backend->log(AQ_LOG_DEBUG, std::format("drm: {} is not connected, clearing stale crtc {}", c->szName, c->crtc->id));
+-        c->crtc.reset();
++        c->setCRTC(nullptr);
+     }
+ 
+     // tell the user to re-assign a valid mode etc, if needed
+@@ -1156,50 +1161,104 @@ eBackendGPUDriver Aquamarine::CDRMBackend::gpuDriver() {
+     return driver;
+ }
+ 
+-static void handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, unsigned crtc_id, void* data) {
+-    auto pageFlip = (SDRMPageFlip*)data;
++uintptr_t Aquamarine::CDRMBackend::nextPageFlipID() {
++    return ++m_lastPageFlipID;
++}
++
++SP<SDRMCRTC> Aquamarine::CDRMBackend::crtcByID(uint32_t id) {
++    auto it = std::find_if(crtcs.begin(), crtcs.end(), [id](const auto& c) { return c->id == id; });
++    return it == crtcs.end() ? nullptr : *it;
++}
++
++uintptr_t Aquamarine::SDRMCRTC::armPageFlip(CWeakPointer<SDRMConnector> connector, bool async) {
++    if (pendingFlip.id && !(pendingFlip.connector == connector)) {
++        if (const auto PREV = pendingFlip.connector.lock()) {
++            backend->log(AQ_LOG_ERROR, std::format("drm: crtc {} page-flip slot taken from {}, dropping its frame", id, PREV->szName));
++            PREV->invalidateFrame();
++        }
++    }
++
++    pendingFlip.id        = backend->nextPageFlipID();
++    pendingFlip.connector = connector;
++    pendingFlip.async     = async;
++
++    return pendingFlip.id.value();
++}
++
++void Aquamarine::SDRMCRTC::disarmPageFlip() {
++    pendingFlip.id.reset();
++    pendingFlip.connector.reset();
++    pendingFlip.async = false;
++}
++
++static CWeakPointer<CDRMBackend> gDispatchingBackend;
++static void                      handlePF(int fd, unsigned seq, unsigned tv_sec, unsigned tv_usec, unsigned crtc_id, void* data) {
++    const auto BACKEND = gDispatchingBackend.lock();
+ 
+-    if (!pageFlip || !pageFlip->connector)
++    if (!BACKEND || BACKEND->drmFD() != fd)
+         return;
+ 
+-    pageFlip->connector->sched.onFrameComplete();
++    const auto FLIPID = rc<uintptr_t>(data);
++    const auto CRTC   = BACKEND->crtcByID(crtc_id);
+ 
+-    const auto& BACKEND = pageFlip->connector->backend;
++    if (!CRTC || !FLIPID || CRTC->pendingFlip.id != FLIPID) {
++        BACKEND->log(AQ_LOG_DEBUG, std::format("drm: Ignoring a stale pf event, flip {} on crtc {}", FLIPID, crtc_id));
++        return;
++    }
++
++    const auto CONNECTOR = CRTC->pendingFlip.connector.lock();
++    const auto ASYNC     = CRTC->pendingFlip.async;
++    CRTC->disarmPageFlip();
++
++    if (!CONNECTOR) {
++        BACKEND->log(AQ_LOG_DEBUG, "drm: Ignoring a pf event whose connector is gone");
++        return;
++    }
+ 
+     TRACE(BACKEND->log(AQ_LOG_TRACE, std::format("drm: pf event seq {} sec {} usec {} crtc {}", seq, tv_sec, tv_usec, crtc_id)));
+ 
+-    if (pageFlip->connector->status != DRM_MODE_CONNECTED || !pageFlip->connector->crtc || !pageFlip->connector->output) {
++    if (!CONNECTOR->sched.frameInFlight()) {
++        BACKEND->log(AQ_LOG_DEBUG, std::format("drm: Ignoring pf event on {}, no frame in flight?", CONNECTOR->szName));
++        return;
++    }
++
++    CONNECTOR->sched.onFrameComplete();
++
++    if (CONNECTOR->status != DRM_MODE_CONNECTED || !CONNECTOR->crtc || !CONNECTOR->output) {
+         BACKEND->log(AQ_LOG_DEBUG, "drm: Ignoring a pf event from a disabled crtc / connector");
+         return;
+     }
+ 
+     // hold isFrameRunning around the emit (RAII pair, so reentrant enable/disable
+     // can't strand it).
+-    CFrameRunningGuard frameRunning(pageFlip->connector->sched);
++    CFrameRunningGuard frameRunning(CONNECTOR->sched);
+ 
+-    pageFlip->connector->onPresent();
++    // a tearing commit already emitted present and rotated the FBs synchronously
++    if (!ASYNC) {
++        CONNECTOR->onPresent();
+ 
+-    uint32_t flags = IOutput::AQ_OUTPUT_PRESENT_VSYNC | IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK | IOutput::AQ_OUTPUT_PRESENT_HW_COMPLETION | IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
++        uint32_t flags = IOutput::AQ_OUTPUT_PRESENT_VSYNC | IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK | IOutput::AQ_OUTPUT_PRESENT_HW_COMPLETION | IOutput::AQ_OUTPUT_PRESENT_ZEROCOPY;
+ 
+-    timespec presented = {.tv_sec = (time_t)tv_sec, .tv_nsec = (long)(tv_usec * 1000)};
++        timespec presented = {.tv_sec = (time_t)tv_sec, .tv_nsec = (long)(tv_usec * 1000)};
+ 
+-    // nvidia-drm registers no vblank counter, unless module options 'nvidia_drm vblank=1' is set.
+-    // kernel checks for vblank support and fallbacks to setting seq 0 and the timestamp is a plain ktime_get()
+-    // this is not a HW clock, its just a plain software clock fetched from whenever the event was called.
+-    if (BACKEND->gpuDriver() == AQ_BACKEND_GPU_DRIVER_NVIDIA && seq == 0)
+-        flags &= ~IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK;
++        // nvidia-drm registers no vblank counter, unless module options 'nvidia_drm vblank=1' is set.
++        // kernel checks for vblank support and fallbacks to setting seq 0 and the timestamp is a plain ktime_get()
++        // this is not a HW clock, its just a plain software clock fetched from whenever the event was called.
++        if (BACKEND->gpuDriver() == AQ_BACKEND_GPU_DRIVER_NVIDIA && seq == 0)
++            flags &= ~IOutput::AQ_OUTPUT_PRESENT_HW_CLOCK;
+ 
+-    pageFlip->connector->output->events.present.emit(IOutput::SPresentEvent{
+-        .presented = BACKEND->sessionActive(),
+-        .when      = &presented,
+-        .seq       = seq,
+-        .refresh   = (int)(pageFlip->connector->refresh ? (1000000000000LL / pageFlip->connector->refresh) : 0),
+-        .flags     = flags,
+-    });
++        CONNECTOR->output->events.present.emit(IOutput::SPresentEvent{
++            .presented = BACKEND->sessionActive(),
++            .when      = &presented,
++            .seq       = seq,
++            .refresh   = (int)(CONNECTOR->refresh ? (1000000000000LL / CONNECTOR->refresh) : 0),
++            .flags     = flags,
++        });
++    }
+ 
+     // Skip if an idle frame is already queued: it emits events.frame itself, and #325 forbids double-firing.
+-    if (BACKEND->sessionActive() && pageFlip->connector->output->enabledState && !pageFlip->connector->sched.frameScheduled())
+-        pageFlip->connector->sched.frameReady.emit();
++    if (BACKEND->sessionActive() && CONNECTOR->output->enabledState && !CONNECTOR->sched.frameScheduled())
++        CONNECTOR->sched.frameReady.emit();
+ }
+ 
+ bool Aquamarine::CDRMBackend::dispatchEvents() {
+@@ -1208,6 +1267,11 @@ bool Aquamarine::CDRMBackend::dispatchEvents() {
+         .page_flip_handler2 = ::handlePF,
+     };
+ 
++    // drmHandleEvent -> handlePF can dispatch another gpus fd so gDispatchingBackend is the wrong backend.
++    const auto  PREVIOUS = gDispatchingBackend;
++    CScopeGuard dispatchGuard([&PREVIOUS] { gDispatchingBackend = PREVIOUS; });
++    gDispatchingBackend = self;
++
+     if (drmHandleEvent(gpu->fd, &event) != 0)
+         backend->log(AQ_LOG_ERROR, std::format("drm: Failed to handle event on fd {}", gpu->fd));
+ 
+@@ -1234,7 +1298,7 @@ void Aquamarine::CDRMBackend::onReady() {
+         if (!a)
+             backend->log(AQ_LOG_ERROR, "drm: onReady: no renderer for gl formats");
+         else {
+-            auto r = CDRMRenderer::attempt(backend.lock(), gpu->renderNodeFd >= 0 ? gpu->renderNodeFd : gpu->fd);
++            auto r = CDRMRenderer::attempt(backend.lock(), a);
+             if (!r)
+                 backend->log(AQ_LOG_ERROR, "drm: onReady: no renderer for gl formats");
+             else {
+@@ -1457,8 +1521,6 @@ SP<SDRMCRTC> Aquamarine::SDRMConnector::getCurrentCRTC(const drmModeConnector* c
+ }
+ 
+ bool Aquamarine::SDRMConnector::init(drmModeConnector* connector) {
+-    pendingPageFlip.connector = self.lock();
+-
+     if (!getDRMConnectorProps(backend->gpu->fd, id, &props))
+         return false;
+     if (props.values.Colorspace)
+@@ -1475,7 +1537,7 @@ bool Aquamarine::SDRMConnector::init(drmModeConnector* connector) {
+     if (!possibleCrtcs)
+         backend->backend->log(AQ_LOG_ERROR, "drm: No CRTCs possible");
+ 
+-    crtc = getCurrentCRTC(connector);
++    setCRTC(getCurrentCRTC(connector));
+ 
+     return true;
+ }
+@@ -1513,20 +1575,19 @@ void Aquamarine::SDRMConnector::parseTileInfo() {
+     free(blobData);
+ }
+ 
+-void Aquamarine::SDRMConnector::releaseFBReferences() {
+-    std::unordered_set<IBuffer*> releasedBuffers;
+-
+-    const auto                   releaseFB = [&releasedBuffers](SP<CDRMFB>& fb) {
+-        if (!fb) {
+-            fb.reset();
+-            return;
+-        }
++void Aquamarine::SDRMConnector::releaseFBBuffer(const SP<CDRMFB> fb) {
++    if (!fb)
++        return;
+ 
+-        if (auto buf = fb->buffer.lock(); buf && buf->lockedByBackend && releasedBuffers.emplace(buf.get()).second) {
+-            buf->lockedByBackend = false;
+-            buf->events.backendRelease.emit();
+-        }
++    if (auto buf = fb->buffer.lock(); buf && buf->lockedByBackend) {
++        buf->lockedByBackend = false;
++        buf->events.backendRelease.emit();
++    }
++}
+ 
++void Aquamarine::SDRMConnector::releaseFBReferences() {
++    const auto releaseFB = [this](SP<CDRMFB>& fb) {
++        releaseFBBuffer(fb);
+         fb.reset();
+     };
+ 
+@@ -1545,8 +1606,6 @@ void Aquamarine::SDRMConnector::releaseFBReferences() {
+ 
+         releaseFB(crtc->pendingCursor);
+     }
+-
+-    releaseFB(pendingCursorFB);
+ }
+ 
+ Aquamarine::SDRMConnector::~SDRMConnector() {
+@@ -1640,39 +1699,21 @@ IOutput::SParsedEDID Aquamarine::SDRMConnector::parseEDID(std::vector<uint8_t> d
+                                                 parsed.chromaticityCoords->blue.y, parsed.chromaticityCoords->white.y, parsed.chromaticityCoords->white.y)));
+     }
+ 
+-    auto exts = di_edid_get_extensions(edid);
+-
+-    for (; *exts != nullptr; exts++) {
+-        auto tag = di_edid_ext_get_tag(*exts);
+-        TRACE(backend->backend->log(AQ_LOG_TRACE, std::format("EDID: checking ext {}", (uint32_t)tag)));
+-        if (tag == DI_EDID_EXT_DISPLAYID)
+-            backend->backend->log(AQ_LOG_WARNING, "FIXME: support displayid blocks");
+-
+-        const auto cta = di_edid_ext_get_cta(*exts);
+-        if (cta) {
+-            TRACE(backend->backend->log(AQ_LOG_TRACE, "EDID: found CTA"));
+-            const di_cta_hdr_static_metadata_block* hdr_static_metadata = nullptr;
+-            const di_cta_colorimetry_block*         colorimetry         = nullptr;
+-            auto                                    blocks              = di_edid_cta_get_data_blocks(cta);
+-            for (; *blocks != nullptr; blocks++) {
+-                if (!hdr_static_metadata && (hdr_static_metadata = di_cta_data_block_get_hdr_static_metadata(*blocks))) {
+-                    TRACE(backend->backend->log(AQ_LOG_TRACE, std::format("EDID: found HDR {}", hdr_static_metadata->eotfs->pq)));
+-                    parsed.hdrMetadata = IOutput::SHDRMetadata{
+-                        .desiredContentMaxLuminance      = hdr_static_metadata->desired_content_max_luminance,
+-                        .desiredMaxFrameAverageLuminance = hdr_static_metadata->desired_content_max_frame_avg_luminance,
+-                        .desiredContentMinLuminance      = hdr_static_metadata->desired_content_min_luminance,
+-                        .supportsPQ                      = hdr_static_metadata->eotfs->pq,
+-                    };
+-                    continue;
+-                }
+-                if (!colorimetry && (colorimetry = di_cta_data_block_get_colorimetry(*blocks))) {
+-                    TRACE(backend->backend->log(AQ_LOG_TRACE, std::format("EDID: found colorimetry {}", colorimetry->bt2020_rgb)));
+-                    parsed.supportsBT2020 = colorimetry->bt2020_rgb;
+-                    continue;
+-                }
+-            }
+-            break;
+-        }
++    const auto* hdr_static_metadata = di_info_get_hdr_static_metadata(info);
++    if (hdr_static_metadata && (hdr_static_metadata->pq || hdr_static_metadata->hlg)) {
++        TRACE(backend->backend->log(AQ_LOG_TRACE, std::format("EDID: found HDR pq={} hlg={}", hdr_static_metadata->pq, hdr_static_metadata->hlg)));
++        parsed.hdrMetadata = IOutput::SHDRMetadata{
++            .desiredContentMaxLuminance      = hdr_static_metadata->desired_content_max_luminance,
++            .desiredMaxFrameAverageLuminance = hdr_static_metadata->desired_content_max_frame_avg_luminance,
++            .desiredContentMinLuminance      = hdr_static_metadata->desired_content_min_luminance,
++            .supportsPQ                      = hdr_static_metadata->pq,
++        };
++    }
++
++    const auto* ssc = di_info_get_supported_signal_colorimetry(info);
++    if (ssc) {
++        TRACE(backend->backend->log(AQ_LOG_TRACE, std::format("EDID: found colorimetry bt2020_rgb={}", ssc->bt2020_rgb)));
++        parsed.supportsBT2020 = ssc->bt2020_rgb;
+     }
+ 
+     di_info_destroy(info);
+@@ -1714,6 +1755,9 @@ void Aquamarine::SDRMConnector::connect(drmModeConnector* connector) {
+         return;
+     }
+ 
++    // max_bpc-less retry is per-sink and must not persist across hotplugs.
++    maxBpcFailed = false;
++
+     backend->backend->log(AQ_LOG_DEBUG, std::format("drm: Connecting connector {}, {}", szName, crtc ? std::format("CRTC ID {}", crtc->id) : "no CRTC"));
+ 
+     output            = SP<CDRMOutput>(new CDRMOutput(szName, backend, self.lock()));
+@@ -1834,6 +1878,8 @@ void Aquamarine::SDRMConnector::disconnect() {
+         return;
+     }
+ 
++    invalidateFrame();
++
+     status = DRM_MODE_DISCONNECTED;
+     releaseFBReferences();
+ 
+@@ -1846,23 +1892,33 @@ bool Aquamarine::SDRMConnector::commitState(SDRMConnectorCommitData& data) {
+ 
+     if (ok && !data.test)
+         applyCommit(data);
+-    else
+-        rollbackCommit(data);
+ 
+     return ok;
+ }
+ 
+ void Aquamarine::SDRMConnector::applyCommit(const SDRMConnectorCommitData& data) {
+-    crtc->primary->back = data.mainFB;
+-    if (crtc->cursor && data.cursorFB)
+-        crtc->cursor->back = data.cursorFB;
++    const bool enable = data.enabled && data.mainFB;
++
++    if (enable && data.mainFB != crtc->primary->front) {
++        if (crtc->primary->back != crtc->primary->front && crtc->primary->back != data.mainFB)
++            releaseFBBuffer(crtc->primary->back);
+ 
+-    if (data.mainFB)
++        crtc->primary->back                  = data.mainFB;
+         data.mainFB->buffer->lockedByBackend = true;
+-    if (crtc->cursor && data.cursorFB)
+-        data.cursorFB->buffer->lockedByBackend = true;
++    }
+ 
+-    pendingCursorFB.reset();
++    if (enable && crtc->cursor && data.cursorFB) {
++        if (data.cursorFB != crtc->cursor->front) {
++            if (crtc->cursor->back != crtc->cursor->front && crtc->cursor->back != data.cursorFB)
++                releaseFBBuffer(crtc->cursor->back);
++
++            crtc->cursor->back                     = data.cursorFB;
++            data.cursorFB->buffer->lockedByBackend = true;
++        }
++
++        if (crtc->pendingCursor == data.cursorFB)
++            crtc->pendingCursor.reset();
++    }
+ 
+     if (data.committed & COutputState::AQ_OUTPUT_STATE_MODE)
+         refresh = calculateRefresh(data.modeInfo);
+@@ -1872,7 +1928,7 @@ void Aquamarine::SDRMConnector::applyCommit(const SDRMConnectorCommitData& data)
+ 
+     if (!output->enabledState) {
+         releaseFBReferences();
+-        sched.invalidate();
++        invalidateFrame();
+     }
+ 
+     if (!backend->updateSecondaryRendererState())
+@@ -1892,27 +1948,33 @@ void Aquamarine::SDRMConnector::applyCommit(const SDRMConnectorCommitData& data)
+     }
+ }
+ 
+-void Aquamarine::SDRMConnector::rollbackCommit(const SDRMConnectorCommitData& data) {
+-    // cursors are applied regardless,
+-    // unless this was a test
+-    if (data.test)
++void Aquamarine::SDRMConnector::invalidateFrame() {
++    sched.invalidate();
++
++    if (crtc && crtc->pendingFlip.connector == self)
++        crtc->disarmPageFlip();
++}
++
++void Aquamarine::SDRMConnector::setCRTC(SP<SDRMCRTC> newCRTC) {
++    if (crtc == newCRTC)
+         return;
+ 
+-    if (crtc->cursor && data.cursorFB)
+-        crtc->cursor->back = data.cursorFB;
++    invalidateFrame();
+ 
+-    crtc->pendingCursor.reset();
++    crtc = newCRTC;
+ }
+ 
+ void Aquamarine::SDRMConnector::onPresent() {
+-    crtc->primary->last  = crtc->primary->front;
+-    crtc->primary->front = crtc->primary->back;
+-    if (crtc->primary->last && crtc->primary->last->buffer) {
+-        crtc->primary->last->buffer->lockedByBackend = false;
+-        crtc->primary->last->buffer->events.backendRelease.emit();
++    if (crtc->primary->back && crtc->primary->back != crtc->primary->front) {
++        crtc->primary->last  = crtc->primary->front;
++        crtc->primary->front = crtc->primary->back;
++        if (crtc->primary->last && crtc->primary->last->buffer) {
++            crtc->primary->last->buffer->lockedByBackend = false;
++            crtc->primary->last->buffer->events.backendRelease.emit();
++        }
+     }
+ 
+-    if (crtc->cursor) {
++    if (crtc->cursor && crtc->cursor->back && crtc->cursor->back != crtc->cursor->front) {
+         crtc->cursor->last  = crtc->cursor->front;
+         crtc->cursor->front = crtc->cursor->back;
+         if (crtc->cursor->last && crtc->cursor->last->buffer) {
+@@ -2017,10 +2079,7 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
+ 
+     // If we are changing the rendering format, we may need to reconfigure the output (aka modeset)
+     // which may result in some glitches
+-    const bool NEEDS_RECONFIG = COMMITTED &
+-        (COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_ENABLED | COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_FORMAT |
+-         COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_MODE | COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_HDR |
+-         COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_WCG);
++    const bool NEEDS_RECONFIG = state->needsReconfig();
+ 
+     const bool BLOCKING = NEEDS_RECONFIG || !(COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_BUFFER);
+ 
+@@ -2041,10 +2100,11 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
+         }
+ 
+         if (STATE.enabled && NEEDS_RECONFIG && connector->sched.frameInFlight()) {
+-            // ALLOW_MODESET resets the CRTC and cancels the in-flight flip; no
+-            // completion event will arrive, so clear the userspace state.
++            // ALLOW_MODESET resets the CRTC, so the in-flight flip is either cancelled or
++            // superseded by this commit. drop it either way; whatever event still arrives no
++            // longer matches the crtcs id and is discarded.
+             backend->backend->log(AQ_LOG_DEBUG, std::format("drm: page-flip on {} cancelled by modeset, clearing flip state", name));
+-            connector->sched.invalidate();
++            connector->invalidateFrame();
+         }
+ 
+         if (STATE.enabled && (COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_BUFFER) && connector->sched.frameInFlight()) {
+@@ -2064,12 +2124,22 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
+ 
+     SDRMConnectorCommitData data;
+ 
++    // A commit that carries no new buffer has nothing to blit: STATE.buffer is the one we already copied
++    SP<CDRMFB> blittedFB;
++    if (backend->shouldBlit() && !(COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_BUFFER)) {
++        const auto& LAST = connector->crtc->primary->back ? connector->crtc->primary->back : connector->crtc->primary->front;
++        if (LAST && !LAST->dead)
++            blittedFB = LAST;
++    }
++
+     if (STATE.buffer && STATE.enabled) {
+         TRACE(backend->backend->log(AQ_LOG_TRACE, "drm: Committed a buffer, updating state"));
+ 
+         SP<CDRMFB> drmFB;
+ 
+-        if (backend->shouldBlit()) {
++        if (blittedFB)
++            drmFB = blittedFB;
++        else if (backend->shouldBlit()) {
+             if (!backend->rendererState.renderer) {
+                 backend->backend->log(AQ_LOG_DEBUG, "drm: No renderer attached to backend when required for blitting, initializing");
+                 if (!backend->initMgpu() || !backend->rendererState.renderer || !backend->rendererState.allocator) {
+@@ -2093,12 +2163,19 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
+             OPTIONS.multigpu = false; // this is not a shared swapchain, and additionally, don't make it linear, nvidia would be mad
+             OPTIONS.cursor   = false;
+             OPTIONS.scanout  = true;
++            if (OPTIONS.length == 0) // releaseMgpuResources() cleared the swapchain and we committed without updating it.
++                OPTIONS.length = 2;
+             if (!mgpu.swapchain->reconfigure(OPTIONS)) {
+                 backend->backend->log(AQ_LOG_ERROR, "drm: Backend requires blit, but the mgpu swapchain failed reconfiguring");
+                 return false;
+             }
+ 
+-            auto                         NEWAQBUF = mgpu.swapchain->next(nullptr);
++            auto NEWAQBUF = mgpu.swapchain->next(nullptr);
++            if (!NEWAQBUF) {
++                backend->backend->log(AQ_LOG_ERROR, "drm: Backend requires blit, but the mgpu swapchain has no buffer");
++                return false;
++            }
++
+             SP<Aquamarine::CDRMRenderer> primaryRenderer;
+             if (backend->primary)
+                 primaryRenderer = backend->primary->rendererState.renderer;
+@@ -2267,6 +2344,10 @@ bool Aquamarine::CDRMOutput::setCursor(SP<IBuffer> buffer, const Vector2D& hotsp
+     if (!connector->crtc)
+         return false;
+ 
++    // already hidden
++    if (!buffer && !cursorVisible)
++        return true;
++
+     state->internalState.committed |= COutputState::AQ_OUTPUT_STATE_CURSOR_SHAPE;
+     if (!buffer)
+         setCursorVisible(false);
+@@ -2319,7 +2400,12 @@ bool Aquamarine::CDRMOutput::setCursor(SP<IBuffer> buffer, const Vector2D& hotsp
+                 return false;
+             }
+ 
+-            auto                         NEWAQBUF = mgpu.cursorSwapchain->next(nullptr);
++            auto NEWAQBUF = mgpu.cursorSwapchain->next(nullptr);
++            if (!NEWAQBUF) {
++                backend->backend->log(AQ_LOG_ERROR, "drm: Backend requires blit, but the mgpu cursorSwapchain has no buffer");
++                return false;
++            }
++
+             SP<Aquamarine::CDRMRenderer> primaryRenderer;
+             if (backend->primary)
+                 primaryRenderer = backend->primary->rendererState.renderer;
+@@ -2365,7 +2451,16 @@ void Aquamarine::CDRMOutput::scheduleFrame(const scheduleFrameReason reason) {
+                                             connector->sched.frameInFlight(), connector->sched.frameScheduled())));
+     needsFrame = true;
+ 
+-    if (!connector->sched.canSchedule() || !enabledState)
++    if (!enabledState)
++        return;
++
++    // a scheduleFrame mid frame, reschedule one more.
++    if (connector->sched.frameRunning()) {
++        connector->sched.requestReschedule();
++        return;
++    }
++
++    if (!connector->sched.canSchedule())
+         return;
+ 
+     connector->sched.setFrameScheduled(true);
+@@ -2397,6 +2492,54 @@ Vector2D Aquamarine::CDRMOutput::cursorPlaneSize() {
+     return backend->drmProps.cursorSize;
+ }
+ 
++bool Aquamarine::CDRMOutput::hasCursorPlane() const {
++    return connector->status == DRM_MODE_CONNECTED && connector->crtc && connector->crtc->cursor && !connector->crtc->cursor->formats.empty();
++}
++
++std::optional<std::chrono::steady_clock::time_point> Aquamarine::CDRMOutput::nextVBlank() const {
++    const auto BACKEND = backend.lock();
++    if (!BACKEND || !BACKEND->sessionActive() || connector->status != DRM_MODE_CONNECTED || !connector->crtc || !enabledState || connector->refresh <= 0 ||
++        (lease && lease->active))
++        return std::nullopt;
++
++    const auto& STATE = state->state();
++
++    if (state->needsReconfig() || (STATE.committed & (COutputState::AQ_OUTPUT_STATE_ADAPTIVE_SYNC | COutputState::AQ_OUTPUT_STATE_PRESENTATION_MODE)) || !STATE.enabled ||
++        STATE.adaptiveSync || STATE.presentationMode != AQ_OUTPUT_PRESENTATION_VSYNC)
++        return std::nullopt;
++
++    const auto REFRESH_PERIOD = std::chrono::nanoseconds{1'000'000'000'000LL / connector->refresh};
++
++    for (size_t attempt = 0; attempt < 2; ++attempt) {
++        uint64_t sequence = 0, lastVblankNs = 0;
++        if (drmCrtcGetSequence(BACKEND->drmFD(), connector->crtc->id, &sequence, &lastVblankNs))
++            return std::nullopt;
++
++        if (BACKEND->gpuDriver() == AQ_BACKEND_GPU_DRIVER_NVIDIA && sequence == 0)
++            return std::nullopt;
++
++        const auto STEADY_BEFORE = std::chrono::steady_clock::now();
++        timespec   monotonicNow  = {};
++        if (clock_gettime(CLOCK_MONOTONIC, &monotonicNow))
++            return std::nullopt;
++        const auto STEADY_AFTER = std::chrono::steady_clock::now();
++
++        if (lastVblankNs > sc<uint64_t>(std::chrono::nanoseconds::max().count()))
++            return std::nullopt;
++
++        const auto MONOTONIC_NOW = std::chrono::seconds{monotonicNow.tv_sec} + std::chrono::nanoseconds{monotonicNow.tv_nsec};
++        const auto NEXT          = OutputTiming::predictNextVBlank(std::chrono::nanoseconds{lastVblankNs}, MONOTONIC_NOW, REFRESH_PERIOD);
++        if (!NEXT)
++            continue;
++
++        const auto RESULT = OutputTiming::toSteadyClock(*NEXT, MONOTONIC_NOW, STEADY_BEFORE, STEADY_AFTER);
++        if (RESULT)
++            return RESULT;
++    }
++
++    return std::nullopt;
++}
++
+ size_t Aquamarine::CDRMOutput::getGammaSize() {
+     if (!backend->atomic) {
+         backend->log(AQ_LOG_ERROR, "No support for gamma on the legacy iface");
+@@ -2463,6 +2606,9 @@ Aquamarine::CDRMOutput::CDRMOutput(const std::string& name_, Hyprutils::Memory::
+ 
+     // The scheduler's frameReady signal drives the public events.frame on this output.
+     frameReadyListener = connector->sched.frameReady.listen([this]() { events.frame.emit(); });
++
++    // scheduled from inside a running frame, schedule it once the running frame is done.
++    rescheduleListener = connector->sched.rescheduleNeeded.listen([this]() { scheduleFrame(AQ_SCHEDULE_NEEDS_FRAME); });
+ }
+ 
+ SP<CDRMFB> Aquamarine::CDRMFB::create(SP<IBuffer> buffer_, Hyprutils::Memory::CWeakPointer<CDRMBackend> backend_, bool* isNew) {
+diff --git a/src/backend/drm/Renderer.cpp b/src/backend/drm/Renderer.cpp
+index 5e794de..66dc52a 100644
+--- a/src/backend/drm/Renderer.cpp
++++ b/src/backend/drm/Renderer.cpp
+@@ -934,6 +934,11 @@ void CDRMRenderer::clearBuffer(IBuffer* buf) {
+ }
+ 
+ CDRMRenderer::SBlitResult CDRMRenderer::blit(SP<IBuffer> from, SP<IBuffer> to, SP<CDRMRenderer> primaryRenderer, int waitFD) {
++    if (!from || !to) {
++        backend->log(AQ_LOG_ERROR, "EGL (blit): null source or destination buffer");
++        return {};
++    }
++
+     CEglContextGuard eglContext(*this);
+ 
+     if (from->dmabuf().size != to->dmabuf().size) {
+diff --git a/src/backend/drm/impl/Atomic.cpp b/src/backend/drm/impl/Atomic.cpp
+index b136880..48fd3ee 100644
+--- a/src/backend/drm/impl/Atomic.cpp
++++ b/src/backend/drm/impl/Atomic.cpp
+@@ -59,6 +59,75 @@ Aquamarine::CDRMAtomicRequest::CDRMAtomicRequest(Hyprutils::Memory::CWeakPointer
+ Aquamarine::CDRMAtomicRequest::~CDRMAtomicRequest() {
+     if (req)
+         drmModeAtomicFree(req);
++    for (const auto& blob : borrowedModeBlobs) {
++        destroyBlob(blob);
++    }
++}
++
++// Restates every other enabled head at its current mode, so the kernel re-runs
++// its global modeset check across all of them instead of only ours.
++//
++// Drivers that allocate display bandwidth or head resources globally (nvidia,
++// and i915 via intel_bw_atomic_check) can reject a modeset that touches a single
++// connector while the other heads stay pinned in their existing configuration,
++// even when the very same end state commits fine if every head is modeset at
++// once. That is how a 4K@240 DSC mode ends up EINVAL next to two 1080p heads
++// while weston, which configures all outputs in one go, gets it. (see #7912)
++//
++// A fresh blob is required: handing the kernel the same blob id it already holds
++// leaves mode_changed clear, so the driver never redoes the allocation.
++// Returns false if there was nothing to restate.
++bool Aquamarine::CDRMAtomicRequest::restateConnectors(SP<SDRMConnector> self) {
++    if (failed)
++        return false;
++
++    bool any = false;
++
++    for (const auto& c : backend->connectors) {
++        if (c == self || !c->crtc || !c->output)
++            continue;
++
++        if (!c->output->state->state().enabled)
++            continue;
++
++        drmModeModeInfo* current = c->getCurrentMode();
++        if (!current)
++            continue;
++
++        // getCurrentMode hands back a malloc'd copy. Take it by value and release
++        // it right away, so the early exits below don't each need their own free.
++        const drmModeModeInfo mode = *current;
++        free(current); // I know this and other will fail lint
++
++        uint32_t blob = 0;
++        if (drmModeCreatePropertyBlob(backend->gpu->fd, &mode, sizeof(mode), &blob)) {
++            backend->log(AQ_LOG_ERROR, std::format("atomic drm request: failed to blob mode for {} while restating heads", c->szName));
++            continue;
++        }
++
++        borrowedModeBlobs.emplace_back(blob);
++
++        TRACE(backend->log(AQ_LOG_TRACE, std::format("atomic drm request: restating head {} with blob {}", c->szName, blob)));
++
++        add(c->crtc->id, c->crtc->props.values.mode_id, blob);
++        add(c->crtc->id, c->crtc->props.values.active, 1);
++        add(c->id, c->props.values.crtc_id, c->crtc->id);
++
++        // A head that has not scanned out yet has no buffer to restate; its
++        // existing plane state carries over untouched, which is what we want.
++        if (c->crtc->primary && c->crtc->primary->front) {
++            // planeProps reads per-connector state off `conn`, so point it at the
++            // head we are restating rather than ours.
++            const auto saved = conn;
++            conn             = c;
++            planeProps(c->crtc->primary, c->crtc->primary->front, c->crtc->id, {});
++            conn = saved;
++        }
++
++        any = true;
++    }
++
++    return any && !failed;
+ }
+ 
+ void Aquamarine::CDRMAtomicRequest::add(uint32_t id, uint32_t prop, uint64_t val) {
+@@ -165,6 +234,7 @@ void Aquamarine::CDRMAtomicRequest::addConnector(Hyprutils::Memory::CSharedPoint
+     const uint32_t newCrtcID      = enable ? connector->crtc->id : 0;
+     uint64_t       newMaxBpc = 0, newColorspace = 0;
+     uint16_t       newContentType = 0;
++    bool           maxBpcEmitted  = false;
+ 
+     if (enable) {
+         drmModeModeInfo* currentMode = connector->getCurrentMode();
+@@ -178,10 +248,12 @@ void Aquamarine::CDRMAtomicRequest::addConnector(Hyprutils::Memory::CSharedPoint
+             addConnectorModeset(connector, data);
+ 
+         // Setup HDR
+-        if (connector->props.values.max_bpc && connector->maxBpcBounds.at(0) && connector->maxBpcBounds.at(1)) {
++        if (connector->props.values.max_bpc && connector->maxBpcBounds.at(0) && connector->maxBpcBounds.at(1) && !connector->maxBpcFailed) {
+             newMaxBpc = getMaxBPC(connector->maxBpcBounds.at(0), connector->maxBpcBounds.at(1), data.mainFB->buffer->dmabuf().format);
+-            if (forceConnProps || connector->atomic.maxBpc != newMaxBpc)
++            if (forceConnProps || connector->atomic.maxBpc != newMaxBpc) {
+                 add(connector->id, connector->props.values.max_bpc, newMaxBpc);
++                maxBpcEmitted = true;
++            }
+         }
+ 
+         if (connector->props.values.Colorspace && connector->colorspace.values.BT2020_RGB) {
+@@ -206,10 +278,11 @@ void Aquamarine::CDRMAtomicRequest::addConnector(Hyprutils::Memory::CSharedPoint
+             add(connector->id, connector->props.values.content_type, newContentType);
+     }
+ 
+-    data.atomic.maxBpc      = newMaxBpc;
+-    data.atomic.colorspace  = newColorspace;
+-    data.atomic.contentType = newContentType;
+-    data.atomic.crtcID      = newCrtcID;
++    data.atomic.maxBpc        = newMaxBpc;
++    data.atomic.maxBpcEmitted = maxBpcEmitted;
++    data.atomic.colorspace    = newColorspace;
++    data.atomic.contentType   = newContentType;
++    data.atomic.crtcID        = newCrtcID;
+ 
+     add(connector->crtc->id, connector->crtc->props.values.active, enable);
+ 
+@@ -301,12 +374,23 @@ bool Aquamarine::CDRMAtomicRequest::commit(uint32_t flagssss) {
+         return false;
+     }
+ 
+-    if (auto ret = drmModeAtomicCommit(backend->gpu->fd, req, flagssss, conn ? &conn->pendingPageFlip : nullptr); ret) {
++    // a test never flips.
++    const bool WANTSFLIP = conn && conn->crtc && (flagssss & DRM_MODE_PAGE_FLIP_EVENT) && !(flagssss & DRM_MODE_ATOMIC_TEST_ONLY);
++    const auto FLIPID    = WANTSFLIP ? conn->crtc->armPageFlip(conn, flagssss & DRM_MODE_PAGE_FLIP_ASYNC) : uintptr_t{0};
++
++    if (auto ret = drmModeAtomicCommit(backend->gpu->fd, req, flagssss, rc<void*>(FLIPID)); ret) {
+         backend->log((flagssss & DRM_MODE_ATOMIC_TEST_ONLY) ? AQ_LOG_DEBUG : AQ_LOG_ERROR,
+                      std::format("atomic drm request: failed to commit: {}, flags: {}", strerror(ret == -1 ? errno : -ret), flagsToStr(flagssss)));
++
++        if (WANTSFLIP)
++            conn->crtc->disarmPageFlip();
++
+         return false;
+     }
+ 
++    if (WANTSFLIP)
++        conn->sched.onFrameSubmitted();
++
+     return true;
+ }
+ 
+@@ -450,10 +534,7 @@ bool Aquamarine::CDRMAtomicImpl::prepareConnector(Hyprutils::Memory::CSharedPoin
+         if (!connector->props.values.hdr_output_metadata)
+             connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: failed to commit hdr metadata: no HDR_OUTPUT_METADATA prop support");
+         else {
+-            if (!data.hdrMetadata->hdmi_metadata_type1.eotf) {
+-                data.atomic.hdrBlob = 0;
+-                data.atomic.hdrd    = true;
+-            } else if (drmModeCreatePropertyBlob(connector->backend->gpu->fd, &data.hdrMetadata.value(), sizeof(hdr_output_metadata), &data.atomic.hdrBlob)) {
++            if (drmModeCreatePropertyBlob(connector->backend->gpu->fd, &data.hdrMetadata.value(), sizeof(hdr_output_metadata), &data.atomic.hdrBlob)) {
+                 connector->backend->backend->log(AQ_LOG_ERROR, "atomic drm: failed to create a hdr metadata blob");
+                 data.atomic.hdrBlob = 0;
+                 data.atomic.hdrd    = false;
+@@ -505,10 +586,81 @@ bool Aquamarine::CDRMAtomicImpl::commit(Hyprutils::Memory::CSharedPointer<SDRMCo
+     if (!data.blocking && !data.test)
+         flags |= DRM_MODE_ATOMIC_NONBLOCK;
+ 
+-    const bool ok = request.commit(flags);
++    bool ok = request.commit(flags);
++
++    // If the commit failed and max_bpc was actually emitted in this request, retry
++    // without it. Some drivers (notably amdgpu on eDP panels) reject atomic commits
++    // that touch max_bpc. Gate on maxBpcEmitted rather than the staged maxBpc value:
++    // on cached page-flips max_bpc is skipped when unchanged, so an unrelated atomic
++    // failure must not be misattributed to max_bpc and permanently latch maxBpcFailed.
++    if (!ok && data.atomic.maxBpcEmitted && !connector->maxBpcFailed) {
++        connector->backend->backend->log(AQ_LOG_WARNING, "drm: atomic commit failed with max_bpc set, retrying without max_bpc");
++
++        // Re-build the request without max_bpc (addConnector checks maxBpcFailed
++        // and will skip the max_bpc property). The property blobs created in
++        // prepareConnector() are reused as-is, so we must NOT roll back the
++        // original request here or request2 would submit already-destroyed blob
++        // IDs. Blob cleanup is handled by request2.apply()/rollback() below.
++        // maxBpcFailed is latched here so addConnector omits the property, then
++        // cleared on retry failure so a transient error does not permanently
++        // disable max_bpc for this connector.
++        connector->maxBpcFailed   = true;
++        data.atomic.maxBpc        = 0;
++        data.atomic.maxBpcEmitted = false;
++
++        CDRMAtomicRequest request2(backend);
++        request2.addConnector(connector, data);
++
++        ok = request2.commit(flags);
++
++        if (ok) {
++            request2.apply(data);
++            if (!data.test) {
++                connector->atomic.maxBpc      = data.atomic.maxBpc;
++                connector->atomic.colorspace  = data.atomic.colorspace;
++                connector->atomic.contentType = data.atomic.contentType;
++                connector->atomic.crtcID      = data.atomic.crtcID;
++                connector->atomic.propsCached = true;
++                if (data.atomic.ctmd)
++                    connector->crtc->atomic.ctmStateKnown = true;
++
++                if (data.mainFB && data.enabled && (flags & DRM_MODE_PAGE_FLIP_EVENT))
++                    connector->sched.onFrameSubmitted();
++            }
++        } else {
++            connector->maxBpcFailed = false;
++            request2.rollback(data);
++        }
++
++        return ok;
++    }
++
++    // A modeset the driver rejects may still be reachable if every head is
++    // modeset together, since display resources are allocated globally. Retry
++    // once that way before letting the caller fall back to a lesser mode.
++    // See CDRMAtomicRequest::restateConnectors.
++    std::optional<CDRMAtomicRequest> retry;
++    if (!ok && data.modeset) {
++        retry.emplace(backend);
++        retry->addConnector(connector, data);
++        if (retry->restateConnectors(connector)) {
++            ok = retry->commit(flags);
++            if (ok)
++                backend->log(AQ_LOG_DEBUG,
++                             std::format("atomic drm: {} modeset only passed with every head restated; the driver would not "
++                                         "re-allocate for a single connector",
++                                         connector->szName));
++        }
++
++        if (!ok)
++            retry.reset();
++    }
++
++    // whichever request the kernel accepted owns the blob bookkeeping
++    CDRMAtomicRequest& applied = retry.has_value() ? *retry : request;
+ 
+     if (ok) {
+-        request.apply(data);
++        applied.apply(data);
+         if (!data.test) {
+             // remember which connector_state values the kernel last accepted so the
+             // next page-flip can skip emitting unchanged ones (see #265).
+@@ -519,12 +671,9 @@ bool Aquamarine::CDRMAtomicImpl::commit(Hyprutils::Memory::CSharedPointer<SDRMCo
+             connector->atomic.propsCached = true;
+             if (data.atomic.ctmd)
+                 connector->crtc->atomic.ctmStateKnown = true;
+-
+-            if (data.mainFB && data.enabled && (flags & DRM_MODE_PAGE_FLIP_EVENT))
+-                connector->sched.onFrameSubmitted();
+         }
+     } else
+-        request.rollback(data);
++        applied.rollback(data);
+ 
+     return ok;
+ }
+diff --git a/src/backend/drm/impl/Legacy.cpp b/src/backend/drm/impl/Legacy.cpp
+index 82e715e..6993e57 100644
+--- a/src/backend/drm/impl/Legacy.cpp
++++ b/src/backend/drm/impl/Legacy.cpp
+@@ -132,8 +132,11 @@ bool Aquamarine::CDRMLegacyImpl::commitInternal(Hyprutils::Memory::CSharedPointe
+     if (!(data.flags & DRM_MODE_PAGE_FLIP_EVENT))
+         return true;
+ 
+-    if (int ret = drmModePageFlip(connector->backend->gpu->fd, connector->crtc->id, mainFB ? mainFB->id : -1, data.flags, &connector->pendingPageFlip); ret) {
++    const auto FLIPID = connector->crtc->armPageFlip(connector, data.flags & DRM_MODE_PAGE_FLIP_ASYNC);
++
++    if (int ret = drmModePageFlip(connector->backend->gpu->fd, connector->crtc->id, mainFB ? mainFB->id : -1, data.flags, rc<void*>(FLIPID)); ret) {
+         connector->backend->backend->log(AQ_LOG_ERROR, std::format("legacy drm: drmModePageFlip failed: {}", strerror(-ret)));
++        connector->crtc->disarmPageFlip();
+         return false;
+     }
+ 
+diff --git a/src/buffer/Buffer.cpp b/src/buffer/Buffer.cpp
+index 8197742..6d62a90 100644
+--- a/src/buffer/Buffer.cpp
++++ b/src/buffer/Buffer.cpp
+@@ -1,8 +1,16 @@
+ #include <aquamarine/buffer/Buffer.hpp>
+ #include "Shared.hpp"
+ 
++#include <fcntl.h>
++#include <unistd.h>
++
+ using namespace Aquamarine;
+ 
++IBuffer::~IBuffer() {
++    clearPresentationDMABUF();
++    attachments.clear();
++}
++
+ SDMABUFAttrs Aquamarine::IBuffer::dmabuf() {
+     return SDMABUFAttrs{};
+ }
+@@ -39,3 +47,54 @@ void Aquamarine::IBuffer::unlock() {
+ bool Aquamarine::IBuffer::locked() {
+     return locks;
+ }
++
++bool Aquamarine::IBuffer::setPresentationDMABUF(const SDMABUFAttrs& attrs) {
++    clearPresentationDMABUF();
++
++    if (!attrs.success || attrs.planes < 1 || attrs.planes > 4 || attrs.size.x <= 0 || attrs.size.y <= 0)
++        return false;
++
++    auto duplicated    = attrs;
++    duplicated.success = false;
++    duplicated.fds.fill(-1);
++
++    for (int i = 0; i < attrs.planes; ++i) {
++        if (attrs.fds.at(i) < 0) {
++            for (int j = 0; j < i; ++j)
++                close(duplicated.fds.at(j));
++            return false;
++        }
++
++        duplicated.fds.at(i) = fcntl(attrs.fds.at(i), F_DUPFD_CLOEXEC, 0);
++        if (duplicated.fds.at(i) < 0) {
++            for (int j = 0; j < i; ++j)
++                close(duplicated.fds.at(j));
++            return false;
++        }
++    }
++
++    duplicated.success       = true;
++    presentationDMABUFAttrs = duplicated;
++    return true;
++}
++
++SDMABUFAttrs Aquamarine::IBuffer::presentationDMABUF() const {
++    return presentationDMABUFAttrs;
++}
++
++void Aquamarine::IBuffer::clearPresentationDMABUF() {
++    for (int i = 0; i < presentationDMABUFAttrs.planes && i < 4; ++i) {
++        if (presentationDMABUFAttrs.fds.at(i) >= 0)
++            close(presentationDMABUFAttrs.fds.at(i));
++    }
++    presentationDMABUFAttrs = {};
++    presentationDMABUFIsActive = false;
++}
++
++void Aquamarine::IBuffer::setPresentationDMABUFActive(bool active) {
++    presentationDMABUFIsActive = active;
++}
++
++bool Aquamarine::IBuffer::presentationDMABUFActive() const {
++    return presentationDMABUFIsActive;
++}
+diff --git a/src/include/OutputTiming.hpp b/src/include/OutputTiming.hpp
+new file mode 100644
+index 0000000..96a62b5
+--- /dev/null
++++ b/src/include/OutputTiming.hpp
+@@ -0,0 +1,10 @@
++#pragma once
++
++#include <chrono>
++#include <optional>
++
++namespace Aquamarine::OutputTiming {
++    std::optional<std::chrono::nanoseconds> predictNextVBlank(std::chrono::nanoseconds lastVblank, std::chrono::nanoseconds now, std::chrono::nanoseconds refreshPeriod);
++    std::optional<std::chrono::steady_clock::time_point> toSteadyClock(std::chrono::nanoseconds target, std::chrono::nanoseconds monotonicNow,
++                                                                       std::chrono::steady_clock::time_point steadyBefore, std::chrono::steady_clock::time_point steadyAfter);
++}
+diff --git a/src/output/Output.cpp b/src/output/Output.cpp
+index 9621852..1abd4f3 100644
+--- a/src/output/Output.cpp
++++ b/src/output/Output.cpp
+@@ -27,6 +27,10 @@ void Aquamarine::IOutput::setCursorVisible(bool visible) {
+     ;
+ }
+ 
++bool Aquamarine::IOutput::hasCursorPlane() const {
++    return false;
++}
++
+ void Aquamarine::IOutput::scheduleFrame(const scheduleFrameReason reason) {
+     ;
+ }
+@@ -35,6 +39,10 @@ Hyprutils::Math::Vector2D Aquamarine::IOutput::cursorPlaneSize() {
+     return {}; // error
+ }
+ 
++std::optional<std::chrono::steady_clock::time_point> Aquamarine::IOutput::nextVBlank() const {
++    return std::nullopt;
++}
++
+ size_t Aquamarine::IOutput::getGammaSize() {
+     return 0;
+ }
+@@ -51,6 +59,10 @@ const Aquamarine::COutputState::SInternalState& Aquamarine::COutputState::state(
+     return internalState;
+ }
+ 
++bool Aquamarine::COutputState::needsReconfig() const {
++    return internalState.committed & (AQ_OUTPUT_STATE_ENABLED | AQ_OUTPUT_STATE_FORMAT | AQ_OUTPUT_STATE_MODE | AQ_OUTPUT_STATE_HDR | AQ_OUTPUT_STATE_WCG);
++}
++
+ void Aquamarine::COutputState::addDamage(const Hyprutils::Math::CRegion& region) {
+     internalState.damage.add(region);
+     internalState.committed |= AQ_OUTPUT_STATE_DAMAGE;
+diff --git a/src/output/OutputTiming.cpp b/src/output/OutputTiming.cpp
+new file mode 100644
+index 0000000..56f0804
+--- /dev/null
++++ b/src/output/OutputTiming.cpp
+@@ -0,0 +1,25 @@
++#include "OutputTiming.hpp"
++
++std::optional<std::chrono::nanoseconds> Aquamarine::OutputTiming::predictNextVBlank(std::chrono::nanoseconds lastVblank, std::chrono::nanoseconds now,
++                                                                                    std::chrono::nanoseconds refreshPeriod) {
++    if (lastVblank.count() < 0 || now.count() < 0 || refreshPeriod.count() <= 0 || lastVblank > now)
++        return std::nullopt;
++
++    if (now - lastVblank >= refreshPeriod || lastVblank > std::chrono::nanoseconds::max() - refreshPeriod)
++        return std::nullopt;
++
++    return lastVblank + refreshPeriod;
++}
++
++std::optional<std::chrono::steady_clock::time_point> Aquamarine::OutputTiming::toSteadyClock(std::chrono::nanoseconds target, std::chrono::nanoseconds monotonicNow,
++                                                                                             std::chrono::steady_clock::time_point steadyBefore,
++                                                                                             std::chrono::steady_clock::time_point steadyAfter) {
++    if (steadyAfter < steadyBefore || target <= monotonicNow)
++        return std::nullopt;
++
++    const auto RESULT = steadyBefore + (steadyAfter - steadyBefore) / 2 + (target - monotonicNow);
++    if (RESULT <= steadyAfter)
++        return std::nullopt;
++
++    return RESULT;
++}
+diff --git a/tests/KGSLDMAHeapRenderProbe.cpp b/tests/KGSLDMAHeapRenderProbe.cpp
+new file mode 100644
+index 0000000..e2a5b9e
+--- /dev/null
++++ b/tests/KGSLDMAHeapRenderProbe.cpp
+@@ -0,0 +1,147 @@
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <GLES3/gl3.h>
++#include <GLES2/gl2ext.h>
++#include <drm_fourcc.h>
++#include <fcntl.h>
++#include <linux/dma-buf.h>
++#include <linux/dma-heap.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <cerrno>
++#include <cstdio>
++#include <cstring>
++
++static void dumpPixels(const char* label, const unsigned char* pixels, size_t length) {
++    size_t nonzero = 0;
++    unsigned long long sum = 0;
++    for (size_t i = 0; i < length; ++i) {
++        nonzero += pixels[i] != 0;
++        sum += pixels[i];
++    }
++    std::printf("%s nonzero=%zu/%zu sum=%llu first=%02x,%02x,%02x,%02x\n", label, nonzero, length, sum, pixels[0], pixels[1], pixels[2], pixels[3]);
++}
++
++int main(int argc, char** argv) {
++    constexpr int width = 64, height = 64, stride = width * 4;
++    constexpr size_t length = stride * height;
++    const bool withModifier = argc > 1 && std::strcmp(argv[1], "modifier") == 0;
++
++    int heap = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
++    if (heap < 0) {
++        std::fprintf(stderr, "open heap: %s\n", std::strerror(errno));
++        return 1;
++    }
++    dma_heap_allocation_data allocation{.len = length, .fd = 0, .fd_flags = O_RDWR | O_CLOEXEC, .heap_flags = 0};
++    if (ioctl(heap, DMA_HEAP_IOCTL_ALLOC, &allocation) < 0) {
++        std::fprintf(stderr, "allocate: %s\n", std::strerror(errno));
++        return 1;
++    }
++    close(heap);
++    const int fd = static_cast<int>(allocation.fd);
++
++    dma_buf_sync sync{.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW};
++    ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
++    auto* mapped = static_cast<unsigned char*>(mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
++    if (mapped == MAP_FAILED) {
++        std::fprintf(stderr, "mmap: %s\n", std::strerror(errno));
++        return 1;
++    }
++    std::memset(mapped, 0, length);
++    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW;
++    ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
++    munmap(mapped, length);
++
++    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
++    auto createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
++    auto destroyImage = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
++    auto imageToRenderbuffer = reinterpret_cast<PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC>(eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES"));
++    if (!getPlatformDisplay || !createImage || !destroyImage || !imageToRenderbuffer) {
++        std::fprintf(stderr, "required EGL/GL extension entrypoint missing\n");
++        return 1;
++    }
++
++    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
++    EGLint major = 0, minor = 0;
++    if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor)) {
++        std::fprintf(stderr, "eglInitialize: 0x%x\n", eglGetError());
++        return 1;
++    }
++    eglBindAPI(EGL_OPENGL_ES_API);
++    const EGLint contextAttrs[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE};
++    EGLContext context = eglCreateContext(display, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, contextAttrs);
++    if (context == EGL_NO_CONTEXT || !eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context)) {
++        std::fprintf(stderr, "create/make context: 0x%x\n", eglGetError());
++        return 1;
++    }
++
++    EGLint attrs[24] = {
++        EGL_WIDTH, width,
++        EGL_HEIGHT, height,
++        EGL_LINUX_DRM_FOURCC_EXT, static_cast<EGLint>(DRM_FORMAT_XRGB8888),
++        EGL_DMA_BUF_PLANE0_FD_EXT, fd,
++        EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
++        EGL_DMA_BUF_PLANE0_PITCH_EXT, stride,
++    };
++    int attr = 12;
++    if (withModifier) {
++        attrs[attr++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
++        attrs[attr++] = 0;
++        attrs[attr++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
++        attrs[attr++] = 0;
++    }
++    attrs[attr++] = EGL_IMAGE_PRESERVED_KHR;
++    attrs[attr++] = EGL_TRUE;
++    attrs[attr++] = EGL_NONE;
++
++    EGLImageKHR image = createImage(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attrs);
++    if (image == EGL_NO_IMAGE_KHR) {
++        std::fprintf(stderr, "eglCreateImageKHR: 0x%x\n", eglGetError());
++        return 1;
++    }
++    GLuint rbo = 0, fbo = 0;
++    glGenRenderbuffers(1, &rbo);
++    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
++    imageToRenderbuffer(GL_RENDERBUFFER, image);
++    glGenFramebuffers(1, &fbo);
++    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo);
++    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
++    std::printf("egl=%d.%d modifier=%d framebuffer=0x%x gl_error=0x%x\n", major, minor, withModifier, status, glGetError());
++    if (status != GL_FRAMEBUFFER_COMPLETE)
++        return 1;
++
++    glViewport(0, 0, width, height);
++    glDisable(GL_SCISSOR_TEST);
++    glClearColor(1.0f, 0.25f, 0.5f, 1.0f);
++    glClear(GL_COLOR_BUFFER_BIT);
++    glFinish();
++    unsigned char gpuPixels[4 * 4 * 4] = {};
++    glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, gpuPixels);
++    std::printf("post-render gl_error=0x%x\n", glGetError());
++    dumpPixels("gpu-readback", gpuPixels, sizeof(gpuPixels));
++
++    sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ;
++    const int syncStart = ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
++    mapped = static_cast<unsigned char*>(mmap(nullptr, length, PROT_READ, MAP_SHARED, fd, 0));
++    if (mapped == MAP_FAILED) {
++        std::fprintf(stderr, "post-render mmap: %s\n", std::strerror(errno));
++        return 1;
++    }
++    std::printf("cpu-sync=%d errno=%d ", syncStart, syncStart < 0 ? errno : 0);
++    dumpPixels("cpu-map", mapped, length);
++    munmap(mapped, length);
++    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
++    ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
++
++    glDeleteFramebuffers(1, &fbo);
++    glDeleteRenderbuffers(1, &rbo);
++    destroyImage(display, image);
++    eglDestroyContext(display, context);
++    eglTerminate(display);
++    close(fd);
++    return 0;
++}
+diff --git a/tests/KGSLGBMProbe.cpp b/tests/KGSLGBMProbe.cpp
+new file mode 100644
+index 0000000..4fdff0c
+--- /dev/null
++++ b/tests/KGSLGBMProbe.cpp
+@@ -0,0 +1,45 @@
++#include <fcntl.h>
++#include <gbm.h>
++#include <unistd.h>
++
++#include <cerrno>
++#include <cstdio>
++#include <cstring>
++
++int main() {
++    const int fd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
++    if (fd < 0) {
++        std::fprintf(stderr, "open: %s\n", std::strerror(errno));
++        return 1;
++    }
++
++    gbm_device* device = gbm_create_device(fd);
++    if (!device) {
++        std::fprintf(stderr, "gbm_create_device failed: %s\n", std::strerror(errno));
++        close(fd);
++        return 2;
++    }
++
++    std::printf("backend=%s format_xrgb=%d format_argb=%d\n", gbm_device_get_backend_name(device),
++                gbm_device_is_format_supported(device, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING),
++                gbm_device_is_format_supported(device, GBM_FORMAT_ARGB8888, GBM_BO_USE_RENDERING));
++
++    gbm_bo* bo = gbm_bo_create(device, 256, 256, GBM_FORMAT_ARGB8888,
++                               GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
++    if (!bo) {
++        std::fprintf(stderr, "gbm_bo_create failed: %s\n", std::strerror(errno));
++        gbm_device_destroy(device);
++        close(fd);
++        return 3;
++    }
++
++    const int dmafd = gbm_bo_get_fd(bo);
++    std::printf("bo=%p stride=%u modifier=0x%016llx dmafd=%d\n", static_cast<void*>(bo),
++                gbm_bo_get_stride(bo), static_cast<unsigned long long>(gbm_bo_get_modifier(bo)), dmafd);
++    if (dmafd >= 0)
++        close(dmafd);
++    gbm_bo_destroy(bo);
++    gbm_device_destroy(device);
++    close(fd);
++    return 0;
++}
+diff --git a/tests/KGSLGLExportProbe.cpp b/tests/KGSLGLExportProbe.cpp
+new file mode 100644
+index 0000000..4c427f4
+--- /dev/null
++++ b/tests/KGSLGLExportProbe.cpp
+@@ -0,0 +1,73 @@
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <GLES3/gl3.h>
++#include <drm_fourcc.h>
++#include <linux/dma-buf.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <cstdio>
++#include <cstring>
++
++static void dump(const char* label, const unsigned char* p, size_t n) {
++    size_t nonzero = 0;
++    unsigned long long sum = 0;
++    for (size_t i = 0; i < n; ++i) { nonzero += p[i] != 0; sum += p[i]; }
++    std::printf("%s nonzero=%zu/%zu sum=%llu first=%02x,%02x,%02x,%02x\n", label, nonzero, n, sum, p[0], p[1], p[2], p[3]);
++}
++
++int main() {
++    constexpr int width = 64, height = 64;
++    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
++    auto createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
++    auto destroyImage = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
++    auto queryExport = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC>(eglGetProcAddress("eglExportDMABUFImageQueryMESA"));
++    auto exportImage = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEMESAPROC>(eglGetProcAddress("eglExportDMABUFImageMESA"));
++    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
++    EGLint major = 0, minor = 0;
++    if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor)) { std::fprintf(stderr, "eglInitialize: 0x%x\n", eglGetError()); return 1; }
++    const char* extensions = eglQueryString(display, EGL_EXTENSIONS);
++    std::printf("egl=%d.%d export_ext=%d texture_image_ext=%d\n", major, minor,
++        extensions && std::strstr(extensions, "EGL_MESA_image_dma_buf_export"),
++        extensions && std::strstr(extensions, "EGL_KHR_gl_texture_2D_image"));
++    if (!createImage || !destroyImage || !queryExport || !exportImage) { std::fprintf(stderr, "export entrypoint missing\n"); return 1; }
++    eglBindAPI(EGL_OPENGL_ES_API);
++    const EGLint contextAttrs[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE};
++    EGLContext context = eglCreateContext(display, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, contextAttrs);
++    if (context == EGL_NO_CONTEXT || !eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context)) { std::fprintf(stderr, "context: 0x%x\n", eglGetError()); return 1; }
++
++    GLuint texture = 0, fbo = 0;
++    glGenTextures(1, &texture); glBindTexture(GL_TEXTURE_2D, texture);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++    glGenFramebuffers(1, &fbo); glBindFramebuffer(GL_FRAMEBUFFER, fbo); glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
++    std::printf("framebuffer=0x%x gl_error=0x%x\n", glCheckFramebufferStatus(GL_FRAMEBUFFER), glGetError());
++    glViewport(0, 0, width, height); glClearColor(1.0f, 0.25f, 0.5f, 1.0f); glClear(GL_COLOR_BUFFER_BIT); glFinish();
++    unsigned char pixels[64] = {}; glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, pixels); dump("gpu-readback", pixels, sizeof(pixels));
++
++    const EGLint imageAttrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
++    EGLImageKHR image = createImage(display, context, EGL_GL_TEXTURE_2D_KHR, reinterpret_cast<EGLClientBuffer>(static_cast<uintptr_t>(texture)), imageAttrs);
++    if (image == EGL_NO_IMAGE_KHR) { std::fprintf(stderr, "texture eglCreateImageKHR: 0x%x\n", eglGetError()); return 1; }
++    int fourcc = 0, planes = 0;
++    EGLuint64KHR modifier = DRM_FORMAT_MOD_INVALID;
++    if (!queryExport(display, image, &fourcc, &planes, &modifier)) { std::fprintf(stderr, "query export: 0x%x\n", eglGetError()); return 1; }
++    int fds[4] = {-1, -1, -1, -1}; EGLint strides[4] = {}; EGLint offsets[4] = {};
++    if (!exportImage(display, image, fds, strides, offsets)) { std::fprintf(stderr, "export: 0x%x\n", eglGetError()); return 1; }
++    std::printf("export fourcc=0x%x planes=%d modifier=0x%llx fd=%d stride=%d offset=%d\n", fourcc, planes,
++        (unsigned long long)modifier, fds[0], strides[0], offsets[0]);
++
++    const size_t length = static_cast<size_t>(offsets[0]) + static_cast<size_t>(strides[0]) * height;
++    dma_buf_sync sync{.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
++    int syncResult = ioctl(fds[0], DMA_BUF_IOCTL_SYNC, &sync);
++    auto* mapped = static_cast<unsigned char*>(mmap(nullptr, length, PROT_READ, MAP_SHARED, fds[0], 0));
++    std::printf("cpu-map=%p sync=%d ", mapped, syncResult);
++    if (mapped != MAP_FAILED) { dump("cpu-visible", mapped + offsets[0], static_cast<size_t>(strides[0]) * height); munmap(mapped, length); }
++    else std::printf("mmap-failed\n");
++    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ; ioctl(fds[0], DMA_BUF_IOCTL_SYNC, &sync);
++
++    for (int i = 0; i < planes; ++i) if (fds[i] >= 0) close(fds[i]);
++    destroyImage(display, image); glDeleteFramebuffers(1, &fbo); glDeleteTextures(1, &texture);
++    eglDestroyContext(display, context); eglTerminate(display);
++    return 0;
++}
+diff --git a/tests/KGSLGLExportWaylandProbe.cpp b/tests/KGSLGLExportWaylandProbe.cpp
+new file mode 100644
+index 0000000..da1947f
+--- /dev/null
++++ b/tests/KGSLGLExportWaylandProbe.cpp
+@@ -0,0 +1,119 @@
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <GLES3/gl3.h>
++#include <drm_fourcc.h>
++#include <wayland-client.h>
++#include "linux-dmabuf-client.h"
++#include "xdg-shell-client.h"
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <unistd.h>
++
++struct State {
++    wl_display* display = nullptr;
++    wl_compositor* compositor = nullptr;
++    xdg_wm_base* wmBase = nullptr;
++    zwp_linux_dmabuf_v1* dmabuf = nullptr;
++    wl_surface* surface = nullptr;
++    xdg_surface* xdgSurface = nullptr;
++    xdg_toplevel* toplevel = nullptr;
++    wl_buffer* buffer = nullptr;
++    bool configured = false;
++};
++
++static void registryGlobal(void* data, wl_registry* registry, uint32_t name, const char* interface, uint32_t version) {
++    auto* s = static_cast<State*>(data);
++    if (std::strcmp(interface, wl_compositor_interface.name) == 0)
++        s->compositor = static_cast<wl_compositor*>(wl_registry_bind(registry, name, &wl_compositor_interface, version < 5 ? version : 5));
++    else if (std::strcmp(interface, xdg_wm_base_interface.name) == 0)
++        s->wmBase = static_cast<xdg_wm_base*>(wl_registry_bind(registry, name, &xdg_wm_base_interface, version < 5 ? version : 5));
++    else if (std::strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0)
++        s->dmabuf = static_cast<zwp_linux_dmabuf_v1*>(wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface, version < 3 ? version : 3));
++}
++static void registryRemove(void*, wl_registry*, uint32_t) {}
++static const wl_registry_listener registryListener = {registryGlobal, registryRemove};
++static void ping(void*, xdg_wm_base* base, uint32_t serial) { xdg_wm_base_pong(base, serial); }
++static const xdg_wm_base_listener wmListener = {ping};
++static void configure(void* data, xdg_surface* surface, uint32_t serial) {
++    auto* s = static_cast<State*>(data);
++    xdg_surface_ack_configure(surface, serial);
++    s->configured = true;
++    if (s->buffer) {
++        wl_surface_attach(s->surface, s->buffer, 0, 0);
++        wl_surface_damage_buffer(s->surface, 0, 0, INT32_MAX, INT32_MAX);
++        wl_surface_commit(s->surface);
++    }
++}
++static const xdg_surface_listener xdgSurfaceListener = {configure};
++static void topConfigure(void*, xdg_toplevel*, int32_t, int32_t, wl_array*) {}
++static void topClose(void*, xdg_toplevel*) {}
++static void topBounds(void*, xdg_toplevel*, int32_t, int32_t) {}
++static void topCapabilities(void*, xdg_toplevel*, wl_array*) {}
++static const xdg_toplevel_listener topListener = {topConfigure, topClose, topBounds, topCapabilities};
++
++int main() {
++    constexpr int width = 1920, height = 1449;
++    State state;
++    state.display = wl_display_connect(nullptr);
++    if (!state.display) { std::fprintf(stderr, "wl_display_connect failed\n"); return 1; }
++    wl_registry* registry = wl_display_get_registry(state.display);
++    wl_registry_add_listener(registry, &registryListener, &state);
++    wl_display_roundtrip(state.display);
++    if (!state.compositor || !state.wmBase || !state.dmabuf) { std::fprintf(stderr, "missing Wayland globals\n"); return 1; }
++    xdg_wm_base_add_listener(state.wmBase, &wmListener, &state);
++
++    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
++    auto createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
++    auto queryExport = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC>(eglGetProcAddress("eglExportDMABUFImageQueryMESA"));
++    auto exportImage = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEMESAPROC>(eglGetProcAddress("eglExportDMABUFImageMESA"));
++    EGLDisplay eglDisplay = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
++    EGLint major = 0, minor = 0;
++    if (eglDisplay == EGL_NO_DISPLAY || !eglInitialize(eglDisplay, &major, &minor)) { std::fprintf(stderr, "eglInitialize: 0x%x\n", eglGetError()); return 1; }
++    eglBindAPI(EGL_OPENGL_ES_API);
++    const EGLint contextAttrs[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE};
++    EGLContext context = eglCreateContext(eglDisplay, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, contextAttrs);
++    if (context == EGL_NO_CONTEXT || !eglMakeCurrent(eglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, context)) { std::fprintf(stderr, "context: 0x%x\n", eglGetError()); return 1; }
++
++    GLuint texture = 0, fbo = 0;
++    glGenTextures(1, &texture); glBindTexture(GL_TEXTURE_2D, texture);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++    glGenFramebuffers(1, &fbo); glBindFramebuffer(GL_FRAMEBUFFER, fbo); glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
++    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { std::fprintf(stderr, "framebuffer incomplete\n"); return 1; }
++    glViewport(0, 0, width, height);
++    glClearColor(0.8f, 0.05f, 0.35f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
++    glEnable(GL_SCISSOR_TEST);
++    glScissor(width / 4, height / 4, width / 2, height / 2);
++    glClearColor(0.05f, 0.8f, 0.3f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
++    glDisable(GL_SCISSOR_TEST); glFinish();
++
++    const EGLint imageAttrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
++    EGLImageKHR image = createImage(eglDisplay, context, EGL_GL_TEXTURE_2D_KHR, reinterpret_cast<EGLClientBuffer>(static_cast<uintptr_t>(texture)), imageAttrs);
++    if (image == EGL_NO_IMAGE_KHR) { std::fprintf(stderr, "eglCreateImage: 0x%x\n", eglGetError()); return 1; }
++    int fourcc = 0, planes = 0; EGLuint64KHR modifier = DRM_FORMAT_MOD_INVALID;
++    if (!queryExport(eglDisplay, image, &fourcc, &planes, &modifier) || planes != 1) { std::fprintf(stderr, "query export: 0x%x planes=%d\n", eglGetError(), planes); return 1; }
++    int fds[4] = {-1, -1, -1, -1}; EGLint strides[4] = {}, offsets[4] = {};
++    if (!exportImage(eglDisplay, image, fds, strides, offsets)) { std::fprintf(stderr, "export: 0x%x\n", eglGetError()); return 1; }
++    std::printf("export fourcc=0x%x modifier=0x%llx stride=%d offset=%d\n", fourcc, (unsigned long long)modifier, strides[0], offsets[0]);
++
++    zwp_linux_buffer_params_v1* params = zwp_linux_dmabuf_v1_create_params(state.dmabuf);
++    zwp_linux_buffer_params_v1_add(params, fds[0], 0, offsets[0], strides[0], static_cast<uint32_t>(modifier >> 32), static_cast<uint32_t>(modifier));
++    state.buffer = zwp_linux_buffer_params_v1_create_immed(params, width, height, static_cast<uint32_t>(fourcc), 0);
++    zwp_linux_buffer_params_v1_destroy(params);
++    state.surface = wl_compositor_create_surface(state.compositor);
++    state.xdgSurface = xdg_wm_base_get_xdg_surface(state.wmBase, state.surface);
++    xdg_surface_add_listener(state.xdgSurface, &xdgSurfaceListener, &state);
++    state.toplevel = xdg_surface_get_toplevel(state.xdgSurface);
++    xdg_toplevel_add_listener(state.toplevel, &topListener, &state);
++    xdg_toplevel_set_title(state.toplevel, "KGSL zero-copy export probe");
++    xdg_toplevel_set_fullscreen(state.toplevel, nullptr);
++    wl_surface_commit(state.surface);
++    wl_display_flush(state.display);
++    for (int i = 0; i < 500 && wl_display_dispatch(state.display) >= 0; ++i) {
++        if (state.configured && i > 100) break;
++    }
++    sleep(8);
++    return 0;
++}
+diff --git a/tests/KGSLGLFormatExportProbe.cpp b/tests/KGSLGLFormatExportProbe.cpp
+new file mode 100644
+index 0000000..cf3f5d2
+--- /dev/null
++++ b/tests/KGSLGLFormatExportProbe.cpp
+@@ -0,0 +1,80 @@
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <GLES3/gl3.h>
++#include <drm_fourcc.h>
++#include <hyprgraphics/egl/Egl.hpp>
++
++#include <array>
++#include <cstdlib>
++#include <cstdio>
++#include <cstdint>
++#include <unistd.h>
++
++using namespace Hyprgraphics::Egl;
++
++int main(int argc, char** argv) {
++    const int width  = argc > 1 ? std::atoi(argv[1]) : 1448;
++    const int height = argc > 2 ? std::atoi(argv[2]) : 1920;
++    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
++    auto createImage        = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
++    auto destroyImage       = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
++    auto queryExport        = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC>(eglGetProcAddress("eglExportDMABUFImageQueryMESA"));
++    auto exportImage        = reinterpret_cast<PFNEGLEXPORTDMABUFIMAGEMESAPROC>(eglGetProcAddress("eglExportDMABUFImageMESA"));
++
++    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
++    EGLint major = 0, minor = 0;
++    if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor))
++        return 1;
++    eglBindAPI(EGL_OPENGL_ES_API);
++    const EGLint contextAttrs[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE};
++    EGLContext context = eglCreateContext(display, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, contextAttrs);
++    if (context == EGL_NO_CONTEXT || !eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context))
++        return 2;
++
++    constexpr std::array<uint32_t, 4> formats = {
++        DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888,
++    };
++
++    for (const auto drmFormat : formats) {
++        const auto* format = getPixelFormatFromDRM(drmFormat);
++        if (!format) {
++            std::printf("drm=0x%08x missing\n", drmFormat);
++            continue;
++        }
++
++        GLuint texture = 0;
++        glGenTextures(1, &texture);
++        glBindTexture(GL_TEXTURE_2D, texture);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++        glTexImage2D(GL_TEXTURE_2D, 0, format->glInternalFormat ? format->glInternalFormat : format->glFormat,
++                     width, height, 0, format->glFormat, format->glType, nullptr);
++        const GLenum allocError = glGetError();
++
++        const EGLint imageAttrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
++        EGLImageKHR image = createImage(display, context, EGL_GL_TEXTURE_2D_KHR,
++                                        reinterpret_cast<EGLClientBuffer>(static_cast<uintptr_t>(texture)), imageAttrs);
++        int fourcc = 0, planes = 0;
++        EGLuint64KHR modifier = DRM_FORMAT_MOD_INVALID;
++        EGLBoolean queried = image != EGL_NO_IMAGE_KHR && queryExport(display, image, &fourcc, &planes, &modifier);
++        int fds[4] = {-1, -1, -1, -1};
++        EGLint strides[4] = {}, offsets[4] = {};
++        EGLBoolean exported = queried && exportImage(display, image, fds, strides, offsets);
++
++        std::printf("size=%dx%d drm=0x%08x internal=0x%x glfmt=0x%x type=0x%x allocerr=0x%x image=%d query=%d export=%d fd=%d out=0x%08x planes=%d mod=0x%016llx stride=%d eglerr=0x%x\n",
++                    width, height, drmFormat, format->glInternalFormat, format->glFormat, format->glType, allocError,
++                    image != EGL_NO_IMAGE_KHR, queried, exported, fds[0], fourcc, planes,
++                    static_cast<unsigned long long>(modifier), strides[0], eglGetError());
++
++        for (int& fd : fds)
++            if (fd >= 0)
++                close(fd);
++        if (image != EGL_NO_IMAGE_KHR)
++            destroyImage(display, image);
++        glDeleteTextures(1, &texture);
++    }
++
++    eglDestroyContext(display, context);
++    eglTerminate(display);
++    return 0;
++}
+diff --git a/tests/KGSLVulkanEGLRenderProbe.cpp b/tests/KGSLVulkanEGLRenderProbe.cpp
+new file mode 100644
+index 0000000..d1ffb02
+--- /dev/null
++++ b/tests/KGSLVulkanEGLRenderProbe.cpp
+@@ -0,0 +1,151 @@
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <GLES3/gl3.h>
++#include <GLES2/gl2ext.h>
++#include <vulkan/vulkan.h>
++#include <drm_fourcc.h>
++#include <linux/dma-buf.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <cstdio>
++#include <cstring>
++#include <vector>
++
++#define VK_OK(call) do { VkResult r = (call); if (r != VK_SUCCESS) { std::fprintf(stderr, "%s: %d\n", #call, r); return 1; } } while (0)
++
++static void dump(const char* label, const unsigned char* p, size_t n) {
++    size_t nonzero = 0;
++    unsigned long long sum = 0;
++    for (size_t i = 0; i < n; ++i) { nonzero += p[i] != 0; sum += p[i]; }
++    std::printf("%s nonzero=%zu/%zu sum=%llu first=%02x,%02x,%02x,%02x\n", label, nonzero, n, sum, p[0], p[1], p[2], p[3]);
++}
++
++int main(int argc, char** argv) {
++    constexpr uint32_t width = 64, height = 64;
++    const bool withModifier = argc > 1 && std::strcmp(argv[1], "modifier") == 0;
++
++    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
++    app.pApplicationName = "kgsl-vulkan-egl-render-probe";
++    app.apiVersion = VK_API_VERSION_1_1;
++    VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
++    ici.pApplicationInfo = &app;
++    VkInstance instance = VK_NULL_HANDLE;
++    VK_OK(vkCreateInstance(&ici, nullptr, &instance));
++    uint32_t physicalCount = 0;
++    VK_OK(vkEnumeratePhysicalDevices(instance, &physicalCount, nullptr));
++    std::vector<VkPhysicalDevice> physicals(physicalCount);
++    VK_OK(vkEnumeratePhysicalDevices(instance, &physicalCount, physicals.data()));
++    if (physicals.empty()) return 2;
++    VkPhysicalDevice physical = physicals[0];
++    uint32_t familyCount = 0;
++    vkGetPhysicalDeviceQueueFamilyProperties(physical, &familyCount, nullptr);
++    std::vector<VkQueueFamilyProperties> families(familyCount);
++    vkGetPhysicalDeviceQueueFamilyProperties(physical, &familyCount, families.data());
++    uint32_t family = UINT32_MAX;
++    for (uint32_t i = 0; i < familyCount; ++i) if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) { family = i; break; }
++    if (family == UINT32_MAX) return 3;
++    float priority = 1.0f;
++    VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
++    qci.queueFamilyIndex = family; qci.queueCount = 1; qci.pQueuePriorities = &priority;
++    const char* extensions[] = {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME};
++    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
++    dci.queueCreateInfoCount = 1; dci.pQueueCreateInfos = &qci;
++    dci.enabledExtensionCount = 1; dci.ppEnabledExtensionNames = extensions;
++    VkDevice device = VK_NULL_HANDLE;
++    VK_OK(vkCreateDevice(physical, &dci, nullptr, &device));
++
++    VkExternalMemoryImageCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
++    external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
++    imageInfo.pNext = &external;
++    imageInfo.imageType = VK_IMAGE_TYPE_2D;
++    imageInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
++    imageInfo.extent = {width, height, 1};
++    imageInfo.mipLevels = 1; imageInfo.arrayLayers = 1; imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
++    imageInfo.tiling = VK_IMAGE_TILING_LINEAR;
++    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    VkImage vkImage = VK_NULL_HANDLE;
++    VK_OK(vkCreateImage(device, &imageInfo, nullptr, &vkImage));
++    VkMemoryRequirements requirements{};
++    vkGetImageMemoryRequirements(device, vkImage, &requirements);
++    VkPhysicalDeviceMemoryProperties memoryProperties{};
++    vkGetPhysicalDeviceMemoryProperties(physical, &memoryProperties);
++    uint32_t memoryType = UINT32_MAX;
++    for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i)
++        if ((requirements.memoryTypeBits & (1U << i)) && (memoryProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) { memoryType = i; break; }
++    if (memoryType == UINT32_MAX) for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i)
++        if (requirements.memoryTypeBits & (1U << i)) { memoryType = i; break; }
++    if (memoryType == UINT32_MAX) return 4;
++    VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO}; dedicated.image = vkImage;
++    VkExportMemoryAllocateInfo exportInfo{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
++    exportInfo.pNext = &dedicated; exportInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
++    allocation.pNext = &exportInfo; allocation.allocationSize = requirements.size; allocation.memoryTypeIndex = memoryType;
++    VkDeviceMemory memory = VK_NULL_HANDLE;
++    VK_OK(vkAllocateMemory(device, &allocation, nullptr, &memory));
++    VK_OK(vkBindImageMemory(device, vkImage, memory, 0));
++    VkImageSubresource subresource{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
++    VkSubresourceLayout layout{};
++    vkGetImageSubresourceLayout(device, vkImage, &subresource, &layout);
++    auto getMemoryFd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(device, "vkGetMemoryFdKHR"));
++    VkMemoryGetFdInfoKHR fdInfo{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
++    fdInfo.memory = memory; fdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    int fd = -1;
++    VK_OK(getMemoryFd(device, &fdInfo, &fd));
++    std::printf("vulkan allocation=%llu offset=%llu rowPitch=%llu fd=%d\n",
++        (unsigned long long)requirements.size, (unsigned long long)layout.offset, (unsigned long long)layout.rowPitch, fd);
++
++    auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"));
++    auto createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
++    auto destroyImage = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
++    auto imageToRenderbuffer = reinterpret_cast<PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC>(eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES"));
++    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
++    EGLint major = 0, minor = 0;
++    if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor)) { std::fprintf(stderr, "eglInitialize: 0x%x\n", eglGetError()); return 1; }
++    eglBindAPI(EGL_OPENGL_ES_API);
++    const EGLint contextAttrs[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE};
++    EGLContext context = eglCreateContext(display, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, contextAttrs);
++    if (context == EGL_NO_CONTEXT || !eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context)) { std::fprintf(stderr, "context: 0x%x\n", eglGetError()); return 1; }
++    EGLint attrs[24] = {
++        EGL_WIDTH, (EGLint)width, EGL_HEIGHT, (EGLint)height,
++        EGL_LINUX_DRM_FOURCC_EXT, (EGLint)DRM_FORMAT_XRGB8888,
++        EGL_DMA_BUF_PLANE0_FD_EXT, fd,
++        EGL_DMA_BUF_PLANE0_OFFSET_EXT, (EGLint)layout.offset,
++        EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint)layout.rowPitch,
++    };
++    int attr = 12;
++    if (withModifier) {
++        attrs[attr++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT; attrs[attr++] = 0;
++        attrs[attr++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT; attrs[attr++] = 0;
++    }
++    attrs[attr++] = EGL_IMAGE_PRESERVED_KHR; attrs[attr++] = EGL_TRUE; attrs[attr++] = EGL_NONE;
++    EGLImageKHR eglImage = createImage(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attrs);
++    if (eglImage == EGL_NO_IMAGE_KHR) { std::fprintf(stderr, "eglCreateImageKHR: 0x%x\n", eglGetError()); return 1; }
++    GLuint rbo = 0, fbo = 0;
++    glGenRenderbuffers(1, &rbo); glBindRenderbuffer(GL_RENDERBUFFER, rbo); imageToRenderbuffer(GL_RENDERBUFFER, eglImage);
++    glGenFramebuffers(1, &fbo); glBindFramebuffer(GL_FRAMEBUFFER, fbo); glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo);
++    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
++    std::printf("egl=%d.%d modifier=%d framebuffer=0x%x gl_error=0x%x\n", major, minor, withModifier, status, glGetError());
++    if (status != GL_FRAMEBUFFER_COMPLETE) return 1;
++    glViewport(0, 0, width, height); glClearColor(1.0f, 0.25f, 0.5f, 1.0f); glClear(GL_COLOR_BUFFER_BIT); glFinish();
++    unsigned char pixels[64] = {};
++    glReadPixels(0, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
++    std::printf("post-render gl_error=0x%x\n", glGetError()); dump("gpu-readback", pixels, sizeof(pixels));
++
++    dma_buf_sync sync{.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
++    int syncResult = ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
++    auto* mapped = static_cast<unsigned char*>(mmap(nullptr, requirements.size, PROT_READ, MAP_SHARED, fd, 0));
++    std::printf("cpu-map=%p sync=%d ", mapped, syncResult);
++    if (mapped != MAP_FAILED) { dump("cpu-visible", mapped, requirements.size); munmap(mapped, requirements.size); }
++    else std::printf("mmap-failed\n");
++    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ; ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
++
++    glDeleteFramebuffers(1, &fbo); glDeleteRenderbuffers(1, &rbo); destroyImage(display, eglImage);
++    eglDestroyContext(display, context); eglTerminate(display); close(fd);
++    vkDestroyImage(device, vkImage, nullptr); vkFreeMemory(device, memory, nullptr); vkDestroyDevice(device, nullptr); vkDestroyInstance(instance, nullptr);
++    return 0;
++}
+diff --git a/tests/KGSLVulkanExportProbe.cpp b/tests/KGSLVulkanExportProbe.cpp
+new file mode 100644
+index 0000000..3fe13d2
+--- /dev/null
++++ b/tests/KGSLVulkanExportProbe.cpp
+@@ -0,0 +1,153 @@
++#include <vulkan/vulkan.h>
++
++#include <drm_fourcc.h>
++#include <unistd.h>
++
++#include <cstdio>
++#include <vector>
++
++#define VK_CHECK(call)                                                                                                                                        \
++    do {                                                                                                                                                      \
++        const VkResult result = (call);                                                                                                                       \
++        if (result != VK_SUCCESS) {                                                                                                                           \
++            std::fprintf(stderr, "%s failed: %d\n", #call, result);                                                                                         \
++            return 1;                                                                                                                                         \
++        }                                                                                                                                                     \
++    } while (0)
++
++int main() {
++    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
++    app.pApplicationName = "kgsl-vulkan-export-probe";
++    app.apiVersion       = VK_API_VERSION_1_1;
++    VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
++    instanceInfo.pApplicationInfo = &app;
++    VkInstance instance = VK_NULL_HANDLE;
++    VK_CHECK(vkCreateInstance(&instanceInfo, nullptr, &instance));
++
++    uint32_t physicalCount = 0;
++    VK_CHECK(vkEnumeratePhysicalDevices(instance, &physicalCount, nullptr));
++    if (!physicalCount)
++        return 2;
++    std::vector<VkPhysicalDevice> physicals(physicalCount);
++    VK_CHECK(vkEnumeratePhysicalDevices(instance, &physicalCount, physicals.data()));
++    const VkPhysicalDevice physical = physicals[0];
++
++    uint32_t familyCount = 0;
++    vkGetPhysicalDeviceQueueFamilyProperties(physical, &familyCount, nullptr);
++    std::vector<VkQueueFamilyProperties> families(familyCount);
++    vkGetPhysicalDeviceQueueFamilyProperties(physical, &familyCount, families.data());
++    uint32_t family = UINT32_MAX;
++    for (uint32_t i = 0; i < familyCount; ++i) {
++        if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
++            family = i;
++            break;
++        }
++    }
++    if (family == UINT32_MAX)
++        return 3;
++
++    float priority = 1.F;
++    VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
++    queueInfo.queueFamilyIndex = family;
++    queueInfo.queueCount       = 1;
++    queueInfo.pQueuePriorities = &priority;
++    const char* extensions[]   = {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME};
++    VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
++    deviceInfo.queueCreateInfoCount    = 1;
++    deviceInfo.pQueueCreateInfos       = &queueInfo;
++    deviceInfo.enabledExtensionCount   = 1;
++    deviceInfo.ppEnabledExtensionNames = extensions;
++    VkDevice device = VK_NULL_HANDLE;
++    VK_CHECK(vkCreateDevice(physical, &deviceInfo, nullptr, &device));
++
++    constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
++                                        VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++    VkPhysicalDeviceExternalImageFormatInfo externalFormat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO};
++    externalFormat.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    VkPhysicalDeviceImageFormatInfo2 formatInfo{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2};
++    formatInfo.pNext = &externalFormat;
++    formatInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
++    formatInfo.type = VK_IMAGE_TYPE_2D;
++    formatInfo.tiling = VK_IMAGE_TILING_LINEAR;
++    formatInfo.usage = usage;
++    VkExternalImageFormatProperties externalProperties{VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES};
++    VkImageFormatProperties2 formatProperties{VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2};
++    formatProperties.pNext = &externalProperties;
++    VK_CHECK(vkGetPhysicalDeviceImageFormatProperties2(physical, &formatInfo, &formatProperties));
++    std::printf("external_features=0x%x compatible=0x%x\n", externalProperties.externalMemoryProperties.externalMemoryFeatures,
++                externalProperties.externalMemoryProperties.compatibleHandleTypes);
++
++    VkExternalMemoryImageCreateInfo externalImage{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
++    externalImage.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
++    imageInfo.pNext       = &externalImage;
++    imageInfo.imageType   = VK_IMAGE_TYPE_2D;
++    imageInfo.format      = VK_FORMAT_B8G8R8A8_UNORM;
++    imageInfo.extent      = {1920, 1200, 1};
++    imageInfo.mipLevels   = 1;
++    imageInfo.arrayLayers = 1;
++    imageInfo.samples     = VK_SAMPLE_COUNT_1_BIT;
++    imageInfo.tiling      = VK_IMAGE_TILING_LINEAR;
++    imageInfo.usage       = usage;
++    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    VkImage image = VK_NULL_HANDLE;
++    VK_CHECK(vkCreateImage(device, &imageInfo, nullptr, &image));
++
++    VkMemoryRequirements requirements{};
++    vkGetImageMemoryRequirements(device, image, &requirements);
++    VkPhysicalDeviceMemoryProperties memories{};
++    vkGetPhysicalDeviceMemoryProperties(physical, &memories);
++    uint32_t memoryType = UINT32_MAX;
++    for (uint32_t i = 0; i < memories.memoryTypeCount; ++i) {
++        if ((requirements.memoryTypeBits & (1U << i)) && (memories.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
++            memoryType = i;
++            break;
++        }
++    }
++    if (memoryType == UINT32_MAX) {
++        for (uint32_t i = 0; i < memories.memoryTypeCount; ++i) {
++            if (requirements.memoryTypeBits & (1U << i)) {
++                memoryType = i;
++                break;
++            }
++        }
++    }
++    if (memoryType == UINT32_MAX)
++        return 4;
++
++    VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
++    dedicated.image = image;
++    VkExportMemoryAllocateInfo exportInfo{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
++    exportInfo.pNext = &dedicated;
++    exportInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
++    allocation.pNext = &exportInfo;
++    allocation.allocationSize = requirements.size;
++    allocation.memoryTypeIndex = memoryType;
++    VkDeviceMemory memory = VK_NULL_HANDLE;
++    VK_CHECK(vkAllocateMemory(device, &allocation, nullptr, &memory));
++    VK_CHECK(vkBindImageMemory(device, image, memory, 0));
++
++    VkImageSubresource subresource{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
++    VkSubresourceLayout layout{};
++    vkGetImageSubresourceLayout(device, image, &subresource, &layout);
++    auto getMemoryFd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(device, "vkGetMemoryFdKHR"));
++    if (!getMemoryFd)
++        return 5;
++    VkMemoryGetFdInfoKHR fdInfo{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
++    fdInfo.memory = memory;
++    fdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    int fd = -1;
++    VK_CHECK(getMemoryFd(device, &fdInfo, &fd));
++    std::printf("drm=0x%x allocation=%llu offset=%llu size=%llu rowPitch=%llu fd=%d\n", DRM_FORMAT_XRGB8888,
++                static_cast<unsigned long long>(requirements.size), static_cast<unsigned long long>(layout.offset),
++                static_cast<unsigned long long>(layout.size), static_cast<unsigned long long>(layout.rowPitch), fd);
++
++    close(fd);
++    vkDestroyImage(device, image, nullptr);
++    vkFreeMemory(device, memory, nullptr);
++    vkDestroyDevice(device, nullptr);
++    vkDestroyInstance(instance, nullptr);
++    return 0;
++}
+diff --git a/tests/Output.cpp b/tests/Output.cpp
+new file mode 100644
+index 0000000..3754fdf
+--- /dev/null
++++ b/tests/Output.cpp
+@@ -0,0 +1,62 @@
++#include <aquamarine/output/Output.hpp>
++#include <aquamarine/backend/Backend.hpp>
++#include <hyprutils/memory/SharedPtr.hpp>
++#include "OutputTiming.hpp"
++#include "shared.hpp"
++
++using namespace Aquamarine;
++using namespace Hyprutils::Memory;
++
++class CTestOutput : public IOutput {
++  public:
++    virtual bool commit() {
++        return false;
++    }
++
++    virtual bool test() {
++        return false;
++    }
++
++    virtual CSharedPointer<IBackendImplementation> getBackend() {
++        return nullptr;
++    }
++
++    virtual std::vector<SDRMFormat> getRenderFormats() {
++        return {};
++    }
++
++    virtual bool pendingPageFlip() {
++        return false;
++    }
++
++    virtual bool pendingIdleFrame() {
++        return false;
++    }
++};
++
++int main() {
++    int         ret = 0;
++    CTestOutput output;
++
++    EXPECT(output.hasCursorPlane(), false);
++    EXPECT(output.nextVBlank().has_value(), false);
++
++    using namespace std::chrono_literals;
++
++    const auto NEXT = OutputTiming::predictNextVBlank(100ns, 150ns, 100ns);
++    EXPECT(NEXT.has_value(), true);
++    EXPECT(NEXT->count(), 200);
++
++    EXPECT(OutputTiming::predictNextVBlank(100ns, 200ns, 100ns).has_value(), false);
++    EXPECT(OutputTiming::predictNextVBlank(201ns, 200ns, 100ns).has_value(), false);
++    EXPECT(OutputTiming::predictNextVBlank(100ns, 150ns, 0ns).has_value(), false);
++    EXPECT(OutputTiming::predictNextVBlank(std::chrono::nanoseconds::max() - 50ns, std::chrono::nanoseconds::max() - 25ns, 100ns).has_value(), false);
++
++    const auto STEADY_EPOCH = std::chrono::steady_clock::time_point{};
++    const auto CONVERTED    = OutputTiming::toSteadyClock(200ns, 150ns, STEADY_EPOCH + 100ns, STEADY_EPOCH + 110ns);
++    EXPECT(CONVERTED.has_value(), true);
++    EXPECT(CONVERTED->time_since_epoch().count(), 155);
++    EXPECT(OutputTiming::toSteadyClock(160ns, 150ns, STEADY_EPOCH + 100ns, STEADY_EPOCH + 120ns).has_value(), false);
++
++    return ret;
++}

@@ -1,0 +1,17 @@
+[Desktop Entry]
+Name=Files
+Comment=Access and organize files
+Keywords=folder;manager;explore;disk;filesystem;nautilus;
+Exec=nautilus --new-window %U
+Icon=org.gnome.Nautilus
+Terminal=false
+Type=Application
+DBusActivatable=false
+StartupNotify=true
+Categories=GNOME;GTK;Utility;Core;FileManager;
+MimeType=inode/directory;
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=nautilus --new-window

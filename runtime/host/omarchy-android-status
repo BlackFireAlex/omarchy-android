@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+
+set -u
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+config_file="${OMARCHY_ANDROID_CONFIG:-$script_dir/../config/runtime.conf}"
+if [[ -r "$config_file" ]]; then
+  # shellcheck source=/dev/null
+  source "$config_file"
+fi
+container="${OMARCHY_CONTAINER:-omarchy-android}"
+state_dir="${OMARCHY_STATE_DIR:-$HOME/.local/state/$container}"
+running=0
+gpu_mode="unknown"
+[[ -r "$state_dir/gpu-mode" ]] && read -r gpu_mode < "$state_dir/gpu-mode"
+
+for item in "x11:termux-x11" "guard:omarchy-process-guard" "weston:weston" "virgl:virgl_test_server_android" "proot:$container"; do
+  name="${item%%:*}"
+  expected="${item#*:}"
+  if [[ "$name" == "guard" && "$(getprop persist.sys.fflag.override.settings_enable_monitor_phantom_procs 2>/dev/null)" == "false" ]]; then
+    printf '%-7s disabled (Android restriction is off)\n' "$name"
+    continue
+  fi
+  if [[ "$name" == "virgl" && "$gpu_mode" == "kgsl" ]]; then
+    printf '%-7s disabled (direct KGSL)\n' "$name"
+    continue
+  fi
+  pid_file="$state_dir/$name.pid"
+  if [[ -r "$pid_file" ]]; then
+    read -r pid < "$pid_file"
+    if [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]]; then
+      cmdline="$( { tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null || true)"
+      if [[ "$cmdline" == *"$expected"* ]]; then
+        stat="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')"
+        printf '%-7s running  pid=%s  state=%s\n' "$name" "$pid" "${stat:-?}"
+        running=$((running + 1))
+        continue
+      fi
+    fi
+  fi
+  printf '%-7s stopped\n' "$name"
+done
+
+printf 'gpu     %s\n' "$gpu_mode"
+
+if [[ -r "$state_dir/geometry" ]]; then
+  printf 'display %s\n' "$(<"$state_dir/geometry")"
+fi
+
+(( running > 0 ))

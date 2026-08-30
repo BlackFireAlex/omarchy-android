@@ -1,0 +1,28 @@
+From 4836226a15c8cd3ea7036391a4683e50985aa2cb Mon Sep 17 00:00:00 2001
+From: BlackFireAlex <8484750+BlackFireAlex@users.noreply.github.com>
+Date: Sat, 29 Aug 2026 23:21:21 -0700
+Subject: [PATCH] display: report successful text-size changes
+
+---
+ bin/omarchy-display-text-size | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/bin/omarchy-display-text-size b/bin/omarchy-display-text-size
+index b15b200f..015187d3 100755
+--- a/bin/omarchy-display-text-size
++++ b/bin/omarchy-display-text-size
+@@ -168,6 +168,11 @@ set_terminal_size() {
+       [[ $new_id =~ ^[0-9]+$ ]] && printf '%s\n' "$new_id" >"$id_file"
+     fi
+   fi
++
++  # Applying the font sizes succeeded even when an optional terminal or
++  # notification branch had nothing to do. Do not leak that branch's false
++  # test status back to the display panel.
++  return 0
+ }
+ 
+ # Report the current terminal point size from whichever config we find first.
+-- 
+2.54.0
+

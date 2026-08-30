@@ -1,0 +1,478 @@
+From 4e611263e651e344ddd7d001dcb6c4dbc2b1de4a Mon Sep 17 00:00:00 2001
+From: BlackFireAlex <8484750+BlackFireAlex@users.noreply.github.com>
+Date: Sat, 29 Aug 2026 19:32:15 -0700
+Subject: [PATCH] render: carry proven Android KGSL presentation path
+
+---
+ src/managers/ProtocolManager.cpp   |  13 ++-
+ src/protocols/ImageCopyCapture.cpp |  55 +++++----
+ src/protocols/LinuxDMABUF.cpp      |  13 +++
+ src/render/OpenGL.cpp              |  30 ++++-
+ src/render/OpenGL.hpp              |   4 +-
+ src/render/gl/GLRenderbuffer.cpp   | 175 +++++++++++++++++++++++++++++
+ src/render/gl/GLRenderbuffer.hpp   |   7 +-
+ 7 files changed, 267 insertions(+), 30 deletions(-)
+
+diff --git a/src/managers/ProtocolManager.cpp b/src/managers/ProtocolManager.cpp
+index bf20269c..ad010a01 100644
+--- a/src/managers/ProtocolManager.cpp
++++ b/src/managers/ProtocolManager.cpp
+@@ -76,6 +76,7 @@
+ #include "../event/EventBus.hpp"
+ #include "../render/Renderer.hpp"
+ #include "../Compositor.hpp"
++#include "../helpers/env/Env.hpp"
+ #include "content-type-v1.hpp"
+ 
+ #include <aquamarine/buffer/Buffer.hpp>
+@@ -256,8 +257,16 @@ CProtocolManager::CProtocolManager() {
+     }
+ 
+     if (!g_pHyprRenderer->getDRMFormats().empty()) {
+-        PROTO::mesaDRM  = makeUnique<CMesaDRMProtocol>(&wl_drm_interface, 2, "MesaDRM");
+-        PROTO::linuxDma = makeUnique<CLinuxDMABufV1Protocol>(&zwp_linux_dmabuf_v1_interface, 5, "LinuxDMABUF");
++        // Android/KGSL has DMA-BUF import/export but no DRM node that can
++        // provide v4 feedback's main_device. Advertise the complete legacy v3
++        // format/modifier path instead; this is also what the parent Weston
++        // exposes in Termux:X11.
++        const bool androidDMABUF = Env::envEnabled("HYPRLAND_ANDROID_DMABUF");
++        if (!androidDMABUF)
++            PROTO::mesaDRM = makeUnique<CMesaDRMProtocol>(&wl_drm_interface, 2, "MesaDRM");
++
++        const int dmabufVersion = androidDMABUF ? 3 : 5;
++        PROTO::linuxDma         = makeUnique<CLinuxDMABufV1Protocol>(&zwp_linux_dmabuf_v1_interface, dmabufVersion, "LinuxDMABUF");
+     } else
+         Log::logger->log(Log::WARN, "ProtocolManager: Not binding linux-dmabuf and MesaDRM: DMABUF not available");
+ }
+diff --git a/src/protocols/ImageCopyCapture.cpp b/src/protocols/ImageCopyCapture.cpp
+index 20d990b4..ebde2b24 100644
+--- a/src/protocols/ImageCopyCapture.cpp
++++ b/src/protocols/ImageCopyCapture.cpp
+@@ -71,7 +71,14 @@ void CImageCopyCaptureSession::sendConstraints() {
+     for (DRMFormat format : formats) {
+         m_resource->sendShmFormat(NFormatUtils::drmToShm(format));
+ 
+-        auto     modifiers = g_pHyprRenderer->getDRMFormatModifiers(format);
++        // Nested Android sessions render into Wayland SHM and may not create
++        // the server-side linux-dmabuf protocol at all.  SHM capture remains
++        // fully usable, so advertise DMA-BUF constraints only when that
++        // protocol exists instead of dereferencing a null global.
++        if (!PROTO::linuxDma)
++            continue;
++
++        auto modifiers = g_pHyprRenderer->getDRMFormatModifiers(format);
+ 
+         wl_array modsArr;
+         wl_array_init(&modsArr);
+@@ -81,12 +88,14 @@ void CImageCopyCaptureSession::sendConstraints() {
+         wl_array_release(&modsArr);
+     }
+ 
+-    dev_t           device    = PROTO::linuxDma->getMainDevice();
+-    struct wl_array deviceArr = {
+-        .size = sizeof(device),
+-        .data = sc<void*>(&device),
+-    };
+-    m_resource->sendDmabufDevice(&deviceArr);
++    if (PROTO::linuxDma) {
++        dev_t           device    = PROTO::linuxDma->getMainDevice();
++        struct wl_array deviceArr = {
++            .size = sizeof(device),
++            .data = sc<void*>(&device),
++        };
++        m_resource->sendDmabufDevice(&deviceArr);
++    }
+ 
+     m_bufferSize = m_session->bufferSize();
+     m_resource->sendBufferSize(m_bufferSize.x, m_bufferSize.y);
+@@ -282,21 +291,23 @@ void CImageCopyCaptureCursorSession::sendConstraints() {
+ 
+     m_sessionResource->sendShmFormat(NFormatUtils::drmToShm(format));
+ 
+-    auto     modifiers = g_pHyprRenderer->getDRMFormatModifiers(format);
+-
+-    wl_array modsArr;
+-    wl_array_init(&modsArr);
+-    if (const auto PMODIFIERS = sc<uint64_t*>(wl_array_add(&modsArr, modifiers.size() * sizeof(uint64_t))))
+-        std::ranges::copy(modifiers, PMODIFIERS);
+-    m_sessionResource->sendDmabufFormat(format, &modsArr);
+-    wl_array_release(&modsArr);
+-
+-    dev_t           device    = PROTO::linuxDma->getMainDevice();
+-    struct wl_array deviceArr = {
+-        .size = sizeof(device),
+-        .data = sc<void*>(&device),
+-    };
+-    m_sessionResource->sendDmabufDevice(&deviceArr);
++    if (PROTO::linuxDma) {
++        auto modifiers = g_pHyprRenderer->getDRMFormatModifiers(format);
++
++        wl_array modsArr;
++        wl_array_init(&modsArr);
++        if (const auto PMODIFIERS = sc<uint64_t*>(wl_array_add(&modsArr, modifiers.size() * sizeof(uint64_t))))
++            std::ranges::copy(modifiers, PMODIFIERS);
++        m_sessionResource->sendDmabufFormat(format, &modsArr);
++        wl_array_release(&modsArr);
++
++        dev_t           device    = PROTO::linuxDma->getMainDevice();
++        struct wl_array deviceArr = {
++            .size = sizeof(device),
++            .data = sc<void*>(&device),
++        };
++        m_sessionResource->sendDmabufDevice(&deviceArr);
++    }
+ 
+     m_bufferSize = m_session->bufferSize();
+     m_sessionResource->sendBufferSize(m_bufferSize.x, m_bufferSize.y);
+diff --git a/src/protocols/LinuxDMABUF.cpp b/src/protocols/LinuxDMABUF.cpp
+index 897c98dc..f064855b 100644
+--- a/src/protocols/LinuxDMABUF.cpp
++++ b/src/protocols/LinuxDMABUF.cpp
+@@ -15,6 +15,7 @@
+ #include "../Compositor.hpp"
+ #include "../event/EventBus.hpp"
+ #include "../state/MonitorState.hpp"
++#include "../helpers/env/Env.hpp"
+ 
+ using namespace Hyprutils::OS;
+ 
+@@ -446,6 +447,18 @@ CLinuxDMABufV1Protocol::CLinuxDMABufV1Protocol(const wl_interface* iface, const
+         auto dev        = devIDFromFD(rendererFD);
+ 
+         if (!dev.has_value()) {
++            if (Env::envEnabled("HYPRLAND_ANDROID_DMABUF")) {
++                // KGSL is not a DRM node, so there is no meaningful dev_t or
++                // drmPrimeFDToHandle validation endpoint. EGL still reports
++                // the DMA-BUF formats it can import and performs the real
++                // validation when a client creates a buffer.
++                m_mainDevice = 0;
++                m_formatTable = makeUnique<CDMABUFFormatTable>(
++                    SDMABUFTranche{.device = 0, .flags = 0, .formats = g_pHyprRenderer->getDRMFormats()},
++                    std::vector<std::pair<PHLMONITORREF, SDMABUFTranche>>{});
++                LOGM(Log::DEBUG, "Android KGSL: keeping linux-dmabuf v3 without a DRM node");
++                return;
++            }
+             LOGM(Log::ERR, "failed to get drm dev, disabling linux dmabuf");
+             removeGlobal();
+             return;
+diff --git a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
+index 29e0d766..5e65d4d2 100644
+--- a/src/render/OpenGL.cpp
++++ b/src/render/OpenGL.cpp
+@@ -149,7 +149,7 @@ static ShaderFeatureFlags globalFeatures() {
+         0;
+ }
+ 
+-void CHyprOpenGLImpl::initEGL(bool gbm) {
++void CHyprOpenGLImpl::initEGL(bool gbm, bool surfaceless) {
+     std::vector<EGLint> attrs;
+     if (m_exts.KHR_display_reference) {
+         attrs.push_back(EGL_TRACK_REFERENCES_KHR);
+@@ -158,7 +158,10 @@ void CHyprOpenGLImpl::initEGL(bool gbm) {
+ 
+     attrs.push_back(EGL_NONE);
+ 
+-    m_eglDisplay = m_proc.eglGetPlatformDisplayEXT(gbm ? EGL_PLATFORM_GBM_KHR : EGL_PLATFORM_DEVICE_EXT, gbm ? m_gbmDevice : m_eglDevice, attrs.data());
++    const auto platform = surfaceless ? EGL_PLATFORM_SURFACELESS_MESA : (gbm ? EGL_PLATFORM_GBM_KHR : EGL_PLATFORM_DEVICE_EXT);
++    void* const nativeDisplay = surfaceless ? EGL_DEFAULT_DISPLAY : (gbm ? m_gbmDevice : m_eglDevice);
++
++    m_eglDisplay = m_proc.eglGetPlatformDisplayEXT(platform, nativeDisplay, attrs.data());
+     if (m_eglDisplay == EGL_NO_DISPLAY)
+         RASSERT(false, "EGL: failed to create a platform display");
+ 
+@@ -305,6 +308,8 @@ CHyprOpenGLImpl::CHyprOpenGLImpl() : m_drmFD(g_pCompositor->m_drmRenderNode.fd >
+     loadGLProc(&m_proc.eglDestroySyncKHR, "eglDestroySyncKHR");
+     loadGLProc(&m_proc.eglDupNativeFenceFDANDROID, "eglDupNativeFenceFDANDROID");
+     loadGLProc(&m_proc.eglWaitSyncKHR, "eglWaitSyncKHR");
++    loadGLProc(&m_proc.eglExportDMABUFImageQueryMESA, "eglExportDMABUFImageQueryMESA");
++    loadGLProc(&m_proc.eglExportDMABUFImageMESA, "eglExportDMABUFImageMESA");
+ 
+     RASSERT(m_proc.eglCreateSyncKHR, "Display driver doesn't support eglCreateSyncKHR");
+     RASSERT(m_proc.eglDupNativeFenceFDANDROID, "Display driver doesn't support eglDupNativeFenceFDANDROID");
+@@ -330,7 +335,13 @@ CHyprOpenGLImpl::CHyprOpenGLImpl() : m_drmFD(g_pCompositor->m_drmRenderNode.fd >
+     RASSERT(eglBindAPI(EGL_OPENGL_ES_API) != EGL_FALSE, "Couldn't bind to EGL's opengl ES API. This means your gpu driver f'd up. This is not a hyprland issue.");
+ 
+     bool success = false;
+-    if (EGLEXTENSIONS.contains("EXT_platform_device") || !m_proc.eglQueryDevicesEXT || !m_proc.eglQueryDeviceStringEXT) {
++    if (Env::envEnabled("HYPRLAND_EGL_SURFACELESS") && EGLEXTENSIONS.contains("EGL_MESA_platform_surfaceless")) {
++        Log::logger->log(Log::WARN, "EGL: using the requested surfaceless platform");
++        success = true;
++        initEGL(false, true);
++    }
++
++    if (!success && (EGLEXTENSIONS.contains("EXT_platform_device") || !m_proc.eglQueryDevicesEXT || !m_proc.eglQueryDeviceStringEXT)) {
+         m_eglDevice = eglDeviceFromDRMFD(m_drmFD);
+ 
+         if (m_eglDevice != EGL_NO_DEVICE_EXT) {
+@@ -2670,6 +2681,19 @@ WP<CShader> CHyprOpenGLImpl::getShaderVariant(ePreparedFragmentShader frag, Shad
+ }
+ 
+ std::vector<SDRMFormat> CHyprOpenGLImpl::getDRMFormats() {
++    // Mesa's KGSL surfaceless display can import DMA-BUFs even when its EGL
++    // format query returns an empty list. The nested output already uses this
++    // exact linear 32-bit path. Chromium/ANGLE exports RGBA8 as ABGR8888, so
++    // include that linear format as well instead of rejecting its wl_buffer
++    // before EGL gets a chance to perform the real import validation.
++    if (m_drmFormats.empty() && Env::envEnabled("HYPRLAND_ANDROID_DMABUF")) {
++        return {
++            SDRMFormat{.drmFormat = DRM_FORMAT_XRGB8888, .modifiers = {DRM_FORMAT_MOD_LINEAR}},
++            SDRMFormat{.drmFormat = DRM_FORMAT_ARGB8888, .modifiers = {DRM_FORMAT_MOD_LINEAR}},
++            SDRMFormat{.drmFormat = DRM_FORMAT_ABGR8888, .modifiers = {DRM_FORMAT_MOD_LINEAR}},
++        };
++    }
++
+     return m_drmFormats;
+ }
+ 
+diff --git a/src/render/OpenGL.hpp b/src/render/OpenGL.hpp
+index fc0e3456..7768b760 100644
+--- a/src/render/OpenGL.hpp
++++ b/src/render/OpenGL.hpp
+@@ -272,6 +272,8 @@ namespace Render::GL {
+             PFNEGLDESTROYSYNCKHRPROC                      eglDestroySyncKHR                      = nullptr;
+             PFNEGLDUPNATIVEFENCEFDANDROIDPROC             eglDupNativeFenceFDANDROID             = nullptr;
+             PFNEGLWAITSYNCKHRPROC                         eglWaitSyncKHR                         = nullptr;
++            PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC          eglExportDMABUFImageQueryMESA          = nullptr;
++            PFNEGLEXPORTDMABUFIMAGEMESAPROC               eglExportDMABUFImageMESA               = nullptr;
+         } m_proc;
+ 
+         struct {
+@@ -326,7 +328,7 @@ namespace Render::GL {
+         GLuint                           m_currentProgram;
+ 
+         void                             initDRMFormats();
+-        void                             initEGL(bool gbm);
++        void                             initEGL(bool gbm, bool surfaceless = false);
+         EGLDeviceEXT                     eglDeviceFromDRMFD(int drmFD);
+ 
+         // for the final shader
+diff --git a/src/render/gl/GLRenderbuffer.cpp b/src/render/gl/GLRenderbuffer.cpp
+index 794d0350..cdec3c5a 100644
+--- a/src/render/gl/GLRenderbuffer.cpp
++++ b/src/render/gl/GLRenderbuffer.cpp
+@@ -2,6 +2,7 @@
+ #include "../Renderer.hpp"
+ #include "../OpenGL.hpp"
+ #include "../../Compositor.hpp"
++#include "../../helpers/env/Env.hpp"
+ #include "../Framebuffer.hpp"
+ #include "GLFramebuffer.hpp"
+ #include "../Renderbuffer.hpp"
+@@ -10,6 +11,10 @@
+ #include <hyprutils/signal/Signal.hpp>
+ 
+ #include <dlfcn.h>
++#include <algorithm>
++#include <chrono>
++#include <drm_fourcc.h>
++#include <unistd.h>
+ 
+ using namespace Render::GL;
+ 
+@@ -19,6 +24,11 @@ CGLRenderbuffer::~CGLRenderbuffer() {
+ 
+     g_pHyprOpenGL->makeEGLCurrent();
+ 
++    if (m_exportImage != EGL_NO_IMAGE_KHR) {
++        g_pHyprOpenGL->m_proc.eglDestroyImageKHR(g_pHyprOpenGL->m_eglDisplay, m_exportImage);
++        m_exportImage = EGL_NO_IMAGE_KHR;
++    }
++
+     if (m_framebuffer) {
+         unbind();
+         m_framebuffer->release();
+@@ -34,6 +44,75 @@ CGLRenderbuffer::~CGLRenderbuffer() {
+ CGLRenderbuffer::CGLRenderbuffer(SP<Aquamarine::IBuffer> buffer, uint32_t format) : IRenderbuffer(buffer, format) {
+     auto dma = buffer->dmabuf();
+ 
++    if (!dma.success) {
++        const auto shm = buffer->shm();
++        if (!shm.success || (shm.format != DRM_FORMAT_XRGB8888 && shm.format != DRM_FORMAT_ARGB8888)) {
++            Log::logger->log(Log::ERR, "rb: invalid or unsupported SHM output buffer");
++            return;
++        }
++
++        m_framebuffer = makeShared<CGLFramebuffer>();
++        if (!m_framebuffer->alloc(shm.size.x, shm.size.y, shm.format)) {
++            Log::logger->log(Log::ERR, "rb: failed to allocate the GPU staging framebuffer for SHM output");
++            return;
++        }
++
++        if (Env::envEnabled("HYPRLAND_GL_DMABUF_EXPORT") && g_pHyprOpenGL->m_proc.eglExportDMABUFImageQueryMESA &&
++            g_pHyprOpenGL->m_proc.eglExportDMABUFImageMESA) {
++            const auto texture = m_framebuffer->getTexture();
++            const EGLint imageAttrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
++            m_exportImage = g_pHyprOpenGL->m_proc.eglCreateImageKHR(
++                g_pHyprOpenGL->m_eglDisplay, g_pHyprOpenGL->m_eglContext, EGL_GL_TEXTURE_2D_KHR,
++                reinterpret_cast<EGLClientBuffer>(static_cast<uintptr_t>(texture->m_texID)), imageAttrs);
++
++            if (m_exportImage != EGL_NO_IMAGE_KHR) {
++                int          fourcc = 0;
++                int          planes = 0;
++                EGLuint64KHR modifier = DRM_FORMAT_MOD_INVALID;
++                if (g_pHyprOpenGL->m_proc.eglExportDMABUFImageQueryMESA(g_pHyprOpenGL->m_eglDisplay, m_exportImage, &fourcc, &planes, &modifier) && planes > 0 &&
++                    planes <= 4) {
++                    int    fds[4]     = {-1, -1, -1, -1};
++                    EGLint strides[4] = {};
++                    EGLint offsets[4] = {};
++                    if (g_pHyprOpenGL->m_proc.eglExportDMABUFImageMESA(g_pHyprOpenGL->m_eglDisplay, m_exportImage, fds, strides, offsets)) {
++                        Aquamarine::SDMABUFAttrs attrs{
++                            .success  = true,
++                            .size     = shm.size,
++                            .format   = static_cast<uint32_t>(fourcc),
++                            .modifier = static_cast<uint64_t>(modifier),
++                            .planes   = planes,
++                        };
++                        for (int i = 0; i < planes; ++i) {
++                            attrs.fds.at(i)     = fds[i];
++                            attrs.strides.at(i) = static_cast<uint32_t>(strides[i]);
++                            attrs.offsets.at(i) = static_cast<uint32_t>(offsets[i]);
++                        }
++                        const bool validDescriptors = std::all_of(fds, fds + planes, [](int fd) { return fd >= 0; });
++                        m_gpuExported = validDescriptors && buffer->setPresentationDMABUF(attrs);
++                        if (m_gpuExported)
++                            Log::logger->log(Log::INFO, "rb: GPU presentation export ready: format 0x{:08x}, modifier 0x{:016x}, {} plane(s)",
++                                             attrs.format, attrs.modifier, attrs.planes);
++                        else
++                            Log::logger->log(Log::WARN, "rb: GPU presentation export returned invalid DMA-BUF descriptors; retaining SHM output");
++                        for (int i = 0; i < planes; ++i) {
++                            if (fds[i] >= 0)
++                                close(fds[i]);
++                        }
++                    }
++                }
++            }
++
++            if (!m_gpuExported && m_exportImage != EGL_NO_IMAGE_KHR) {
++                g_pHyprOpenGL->m_proc.eglDestroyImageKHR(g_pHyprOpenGL->m_eglDisplay, m_exportImage);
++                m_exportImage = EGL_NO_IMAGE_KHR;
++            }
++        }
++
++        m_shmBacked = true;
++        m_good      = true;
++        return;
++    }
++
+     m_image = g_pHyprOpenGL->createEGLImage(dma);
+     if (m_image == EGL_NO_IMAGE_KHR) {
+         Log::logger->log(Log::ERR, "rb: createEGLImage failed");
+@@ -71,5 +150,101 @@ void CGLRenderbuffer::bind() {
+ }
+ 
+ void CGLRenderbuffer::unbind() {
++    const auto outputBuffer = m_hlBuffer.lock();
++    if (m_gpuExported && outputBuffer && outputBuffer->presentationDMABUFActive()) {
++        // The current KGSL stack does not attach implicit DMA-BUF fences.
++        // Finish the GPU work before the parent compositor samples the
++        // exported texture. This removes the full-frame CPU readback while a
++        // native-fence hand-off is implemented as the next optimization.
++        glFinish();
++        GLFB(m_framebuffer)->unbind();
++        return;
++    }
++
++    if (m_shmBacked) {
++        // Environment is fixed for the lifetime of the compositor. Cache the
++        // switches instead of calling getenv on every output frame.
++        static const bool damageOnly = Env::envEnabled("HYPRLAND_SHM_DAMAGE");
++        static const bool forceFinish = Env::envEnabled("HYPRLAND_SHM_GLFINISH");
++        static const bool profile     = Env::envEnabled("HYPRLAND_SHM_PROFILE");
++
++        // With continuous frame pacing Hyprland may submit an idle frame with
++        // no changed pixels. Every buffer in the rotating swapchain has already
++        // received its buffer-age damage by that point, so neither map nor read
++        // the 1920x1200 SHM image again.
++        if (damageOnly && g_pHyprRenderer->m_renderData.damage.empty()) {
++            GLFB(m_framebuffer)->unbind();
++            return;
++        }
++
++        const auto buffer = m_hlBuffer.lock();
++        if (!buffer) {
++            GLFB(m_framebuffer)->unbind();
++            return;
++        }
++
++        const auto shm                         = buffer->shm();
++        auto [pixelData, dataFormat, bufferLen] = buffer->beginDataPtr(0);
++        const auto requiredLen                 = static_cast<size_t>(shm.offset) + static_cast<size_t>(shm.stride) * static_cast<size_t>(shm.size.y);
++
++        if (!shm.success || !pixelData || shm.stride <= 0 || requiredLen > bufferLen ||
++            (shm.format != DRM_FORMAT_XRGB8888 && shm.format != DRM_FORMAT_ARGB8888)) {
++            Log::logger->log(Log::ERR, "rb: cannot copy the GPU staging framebuffer into the SHM output buffer");
++            GLFB(m_framebuffer)->unbind();
++            return;
++        }
++
++        const auto started = std::chrono::steady_clock::now();
++
++        if (forceFinish)
++            glFinish();
++
++        glBindFramebuffer(GL_READ_FRAMEBUFFER, GLFB(m_framebuffer)->getFBID());
++        glPixelStorei(GL_PACK_ALIGNMENT, 1);
++
++        int x = 0;
++        int y = 0;
++        int w = static_cast<int>(shm.size.x);
++        int h = static_cast<int>(shm.size.y);
++
++        // The original Android path read 1920x1200 (9.2 MB) after every tiny
++        // cursor or keyboard update.  With full damage tracking enabled, the
++        // staging framebuffer already preserves undamaged pixels, so copy only
++        // the bounding rectangle touched by this frame.  GL_PACK_ROW_LENGTH
++        // writes it directly into the full-stride Wayland SHM image.
++        if (damageOnly) {
++            const auto extents = g_pHyprRenderer->m_renderData.damage.copy()
++                                     .intersect(0, 0, shm.size.x, shm.size.y)
++                                     .getExtents()
++                                     .round();
++            x = std::clamp(static_cast<int>(extents.x), 0, static_cast<int>(shm.size.x));
++            y = std::clamp(static_cast<int>(extents.y), 0, static_cast<int>(shm.size.y));
++            w = std::clamp(static_cast<int>(extents.w), 0, static_cast<int>(shm.size.x) - x);
++            h = std::clamp(static_cast<int>(extents.h), 0, static_cast<int>(shm.size.y) - y);
++        }
++
++        if (w > 0 && h > 0) {
++            glPixelStorei(GL_PACK_ROW_LENGTH, shm.stride / 4);
++            auto* const destination = pixelData + shm.offset + static_cast<size_t>(y) * static_cast<size_t>(shm.stride) + static_cast<size_t>(x) * 4;
++            glReadPixels(x, y, w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, destination);
++            glPixelStorei(GL_PACK_ROW_LENGTH, 0);
++        }
++
++        glPixelStorei(GL_PACK_ALIGNMENT, 4);
++        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
++        buffer->endDataPtr();
++
++        if (profile) {
++            static uint64_t frameCount = 0;
++            static uint64_t totalUs    = 0;
++            static uint64_t totalBytes = 0;
++            totalUs += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
++            totalBytes += static_cast<uint64_t>(w) * static_cast<uint64_t>(h) * 4;
++            if (++frameCount % 120 == 0) {
++                Log::logger->log(Log::INFO, "SHM readback: avg {} us, avg {} KiB over {} frames", totalUs / frameCount, totalBytes / frameCount / 1024, frameCount);
++            }
++        }
++    }
++
+     GLFB(m_framebuffer)->unbind();
+ }
+diff --git a/src/render/gl/GLRenderbuffer.hpp b/src/render/gl/GLRenderbuffer.hpp
+index 4e60431e..12bb0670 100644
+--- a/src/render/gl/GLRenderbuffer.hpp
++++ b/src/render/gl/GLRenderbuffer.hpp
+@@ -14,7 +14,10 @@ namespace Render::GL {
+         void unbind() override;
+ 
+       private:
+-        void*  m_image = nullptr;
+-        GLuint m_rbo   = 0;
++        void*  m_image     = nullptr;
++        void*  m_exportImage = nullptr;
++        GLuint m_rbo       = 0;
++        bool   m_shmBacked = false;
++        bool   m_gpuExported = false;
+     };
+ }

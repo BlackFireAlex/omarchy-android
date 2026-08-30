@@ -1,0 +1,13 @@
+#!/bin/sh
+
+# Android exposes KGSL, not a Linux DRM/GBM render node. Xwayland's automatic
+# glamor fallback still initializes GBM and crashes on that mismatch. Its SHM
+# backend is the correct presentation bridge here; applications remain free to
+# render with Turnip/Vulkan before submitting their X11 window buffers.
+exec env \
+  -u GALLIUM_DRIVER \
+  -u LIBGL_DRIVERS_PATH \
+  -u MESA_LOADER_DRIVER_OVERRIDE \
+  -u VK_ICD_FILENAMES \
+  LD_LIBRARY_PATH=/usr/lib \
+  /usr/bin/Xwayland -shm "$@"
