@@ -82,6 +82,14 @@ printf 'Updating the disposable Arch Linux ARM container...\n'
 pacman -Syu --noconfirm
 pacman -S --needed --noconfirm "${build_roots[@]}" "${runtime_roots[@]}"
 
+# The checked-out sources are owned by GitHub's runner UID and mounted
+# read-only in practice, while this disposable build container runs as root.
+# Trust only the three pinned repositories consumed by the graphics builder.
+for component in mesa aquamarine hyprland; do
+  git config --global --add safe.directory "$project_root/.work/upstream/$component"
+  git config --global --add safe.directory "$project_root/.work/upstream/$component/.git"
+done
+
 OMARCHY_BUILD_JOBS="${OMARCHY_BUILD_JOBS:-4}" \
   "$project_root/builder/guest/build-from-local-forks.sh" \
     "$project_root" \
