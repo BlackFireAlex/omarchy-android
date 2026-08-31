@@ -20,6 +20,15 @@ home=/home/omarchy
   printf 'The CI image builder requires native ARM64.\n' >&2
   exit 1
 }
+# The third-party Arch Linux ARM OCI config is mislabeled amd64. Do not trust
+# that metadata: e_machine at ELF offset 18 must be 0x00b7 (AArch64) before we
+# execute a compiler or publish an image.
+bash_machine="$(od -An -tx1 -j18 -N2 /usr/bin/bash | tr -d '[:space:]')"
+[[ "$bash_machine" == b700 ]] || {
+  printf 'The locked builder rootfs is not AArch64 (ELF machine bytes: %s).\n' \
+    "$bash_machine" >&2
+  exit 1
+}
 [[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || {
   printf 'Invalid image version: %s\n' "$version" >&2
   exit 2
@@ -50,6 +59,17 @@ if grep -q '^DownloadUser' "$pacman_conf"; then
 else
   sed -i '/^\[options\]$/a DownloadUser = root' "$pacman_conf"
 fi
+# Pacman 7's own Landlock/seccomp download sandbox cannot nest inside Docker.
+# Disable only those inner restrictions; the entire builder remains confined
+# to a disposable GitHub-hosted container.
+sed -i \
+  -e '/^DisableSandboxFilesystem$/d' \
+  -e '/^DisableSandboxSyscalls$/d' \
+  "$pacman_conf"
+sed -i \
+  -e '/^\[options\]$/a DisableSandboxSyscalls' \
+  -e '/^\[options\]$/a DisableSandboxFilesystem' \
+  "$pacman_conf"
 
 mapfile -t build_roots < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$build_packages")
 mapfile -t runtime_roots < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$runtime_packages")
