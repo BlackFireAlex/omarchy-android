@@ -28,6 +28,7 @@ wireplumber
 pamixer
 alsa-utils
 wl-clipboard
+wtype
 swaybg
 grim
 slurp

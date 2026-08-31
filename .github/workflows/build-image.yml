@@ -1,0 +1,72 @@
+name: Build ARM64 image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Artifact version label (letters, digits, dots, dashes, underscores)
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-image.yml
+      - builder/**
+      - licenses/**
+      - manifest/**
+      - patches/**
+      - runtime/**
+      - scripts/**
+      - lib/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arm64-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install host validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Select image version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            version="$REQUESTED_VERSION"
+          else
+            version="edge-${GITHUB_SHA:0:12}"
+          fi
+          [[ "$version" =~ ^[A-Za-z0-9._-]+$ ]]
+          printf 'value=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Report native runner capacity
+        run: |
+          uname -a
+          docker version
+          df -h /
+
+      - name: Rebuild sanitized ARM64 rootfs
+        run: ./builder/ci/build-rootfs.sh "${{ steps.version.outputs.value }}"
+
+      - name: Upload image, manifest, inventory, and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-android-rootfs-${{ steps.version.outputs.value }}
+          path: .work/ci-image-${{ steps.version.outputs.value }}/output/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

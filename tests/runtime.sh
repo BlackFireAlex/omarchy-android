@@ -26,9 +26,13 @@ expected_files=(
   home/omarchy/.config/hypr/monitors.lua
   home/omarchy/.config/chromium-flags.conf
   home/omarchy/.config/mimeapps.list
+  home/omarchy/.config/omarchy/dbus-services/ca.desrt.dconf.service
   home/omarchy/.config/omarchy/proot-session-bus.conf
   home/omarchy/.local/share/applications/org.gnome.Nautilus.desktop
   usr/local/bin/Xwayland
+  usr/local/bin/omarchy-dbus-service
+  usr/local/bin/omarchy-voxtype-daemon
+  usr/local/bin/omarchy-voxtype-install
   usr/local/bin/uwsm-app
 )
 
@@ -51,8 +55,13 @@ grep -F 'local omarchy_gdk_scale =' "$temporary_root/home/omarchy/.config/hypr/m
 grep -F 'hl.env("LANG", "C.UTF-8")' "$temporary_root/home/omarchy/.config/hypr/looknfeel.lua" >/dev/null
 grep -F 'OMARCHY_KEYBOARD_LAYOUT' "$temporary_root/home/omarchy/.config/hypr/input.lua" >/dev/null
 grep -F 'DBusActivatable=false' "$temporary_root/home/omarchy/.local/share/applications/org.gnome.Nautilus.desktop" >/dev/null
+grep -F '<servicedir>/home/omarchy/.config/omarchy/dbus-services</servicedir>' \
+  "$temporary_root/home/omarchy/.config/omarchy/proot-session-bus.conf" >/dev/null
+HOME="$temporary_root/home/omarchy" \
+  bash "$temporary_root/usr/local/bin/omarchy-dbus-service" --help >/dev/null
 OMARCHY_PROOT=1 "$temporary_root/usr/local/bin/uwsm-app" -- true
 
 grep -Fx 'gawk' "$ROOT/builder/guest/runtime-packages.txt" >/dev/null
+grep -Fx 'wtype' "$ROOT/builder/guest/runtime-packages.txt" >/dev/null
 
 printf 'runtime template tests passed\n'

@@ -63,6 +63,14 @@ cp -a /usr/share/omarchy/default/bashrc "$home/.bashrc"
 ln -sfn /usr/share/omarchy "$home/.local/share/omarchy"
 
 "$project_root/runtime/guest/install-runtime.sh" /
+"$project_root/builder/guest/install-artifacts.sh" "$project_root" /
+
+# Omarchy ships the public Voxtype defaults, but normally copies them only
+# after installing the optional AUR package. The Android image already carries
+# the checksum-locked ARM64 binary, so seed the matching clean configuration.
+install -D -m 0644 \
+  /usr/share/omarchy/default/voxtype/config.toml \
+  "$home/.config/voxtype/config.toml"
 
 # Omarchy Shell uses Nerd Font private-use glyphs for its system icons and
 # resolves its default family through the package-owned fontconfig policy.

@@ -45,3 +45,21 @@ and renderers are not release artifacts.
 exact `manifest/packages-aarch64-VERSION.lock` package closure, adds the project
 and Weston license texts, records component/patch/package checksums, and emits
 the outer bundle plus SHA-256 sidecar under `.work/releases/`.
+
+## GitHub Actions image rebuild
+
+`.github/workflows/build-image.yml` performs a clean, native ARM64 rebuild on
+GitHub's `ubuntu-24.04-arm` runner. It verifies the locked Arch Linux ARM OCI
+layer, fetches only the pinned source revisions, reapplies the reviewed patch
+series, rebuilds Mesa/Aquamarine/Hyprland, assembles and privacy-audits the
+guest, and uploads these workflow artifacts:
+
+- the compressed ARM64 rootfs image;
+- its exact generated package inventory;
+- the image manifest and SHA-256 checksums; and
+- the rootfs member list used by the structural audit.
+
+This job rebuilds the guest image. The installable release bundle additionally
+contains Android/Bionic host binaries (the patched Weston module and small
+Termux helpers), which remain built and tested from Termux by
+`host/build-release.sh`.

@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=ca.desrt.dconf
+Exec=/usr/lib/dconf-service
+SystemdService=dconf.service

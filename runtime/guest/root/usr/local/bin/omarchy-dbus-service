@@ -1,0 +1,129 @@
+#!/usr/bin/bash
+
+set -euo pipefail
+
+system_dir=/usr/share/dbus-1/services
+curated_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/dbus-services"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  omarchy-dbus-service list [FILTER]
+  omarchy-dbus-service enabled
+  omarchy-dbus-service enable SERVICE
+  omarchy-dbus-service disable SERVICE
+
+SERVICE may be either a D-Bus name such as ca.desrt.dconf or an installed
+.service filename. Changes are persistent. The current session is reloaded
+when possible; otherwise they take effect the next time Omarchy starts.
+EOF
+}
+
+service_name() {
+  sed -n 's/^Name=//p' "$1" | head -n 1
+}
+
+resolve_service() {
+  local query="$1" candidate match=""
+
+  [[ -n "$query" && "$query" != */* ]] || return 1
+  for candidate in "$system_dir/$query" "$system_dir/$query.service"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  for candidate in "$system_dir"/*.service; do
+    [[ -f "$candidate" ]] || continue
+    if [[ "$(service_name "$candidate")" == "$query" ]]; then
+      [[ -z "$match" ]] || {
+        printf 'Multiple installed services declare %s\n' "$query" >&2
+        return 1
+      }
+      match="$candidate"
+    fi
+  done
+
+  [[ -n "$match" ]] || return 1
+  printf '%s\n' "$match"
+}
+
+reload_bus() {
+  if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && command -v dbus-send >/dev/null 2>&1; then
+    dbus-send --session --type=method_call --print-reply \
+      --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig \
+      >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  return 1
+}
+
+mkdir -p "$curated_dir"
+
+case "${1:-}" in
+  list)
+    filter="${2:-}"
+    for source in "$system_dir"/*.service; do
+      [[ -f "$source" ]] || continue
+      name="$(service_name "$source")"
+      [[ -n "$name" ]] || continue
+      if [[ -n "$filter" && "$name" != *"$filter"* && "${source##*/}" != *"$filter"* ]]; then
+        continue
+      fi
+      if [[ -e "$curated_dir/${source##*/}" || -L "$curated_dir/${source##*/}" ]]; then
+        state=enabled
+      else
+        state=available
+      fi
+      printf '%-10s %-48s %s\n' "$state" "$name" "${source##*/}"
+    done
+    ;;
+  enabled)
+    found=0
+    for entry in "$curated_dir"/*.service; do
+      [[ -L "$entry" || -f "$entry" ]] || continue
+      found=1
+      source="$(readlink -f "$entry" 2>/dev/null || printf '%s' "$entry")"
+      if [[ -f "$source" ]]; then
+        printf '%-48s %s\n' "$(service_name "$source")" "${entry##*/}"
+      else
+        printf '%-48s %s\n' BROKEN "${entry##*/}"
+      fi
+    done
+    (( found == 1 )) || echo 'No curated D-Bus services are enabled.'
+    ;;
+  enable)
+    [[ $# == 2 ]] || { usage >&2; exit 2; }
+    source="$(resolve_service "$2")" || {
+      printf 'Installed session service not found: %s\n' "$2" >&2
+      exit 1
+    }
+    destination="$curated_dir/${source##*/}"
+    ln -sfn "$source" "$destination"
+    printf 'Enabled %s\n' "$(service_name "$source")"
+    reload_bus || echo 'Restart Omarchy to activate it in the current session.'
+    ;;
+  disable)
+    [[ $# == 2 ]] || { usage >&2; exit 2; }
+    source="$(resolve_service "$2")" || {
+      printf 'Installed session service not found: %s\n' "$2" >&2
+      exit 1
+    }
+    destination="$curated_dir/${source##*/}"
+    if [[ -L "$destination" || -f "$destination" ]]; then
+      rm -f -- "$destination"
+      printf 'Disabled %s\n' "$(service_name "$source")"
+      reload_bus || echo 'Restart Omarchy to remove it from the current session.'
+    else
+      printf '%s is not enabled.\n' "$(service_name "$source")"
+    fi
+    ;;
+  -h|--help|help|'')
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

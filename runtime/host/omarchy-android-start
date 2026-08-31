@@ -152,6 +152,9 @@ ensure_audio_bridge() {
   local pulse_runtime="$state_dir/pulse-runtime"
   local pulse_state="$state_dir/pulse-state"
   local pulse_pid=""
+  local pulse_source=""
+  local proc_dir cmdline
+  local -a stale_pulse_pids=()
 
   # A stale native-protocol connection can leave pactl waiting forever even
   # though its PulseAudio daemon is no longer usable. TERM alone is not always
@@ -165,6 +168,30 @@ ensure_audio_bridge() {
   if ! pulse_server_responding; then
     mkdir -p "$pulse_runtime" "$pulse_state"
     chmod 700 "$pulse_runtime" "$pulse_state"
+
+    # Android may kill the parent Termux shell without killing a daemonized
+    # PulseAudio child. More than one stale bridge can then survive while only
+    # the newest PID is recorded. Match this install's private log target
+    # before stopping anything so an unrelated Termux audio server is never
+    # touched.
+    for proc_dir in /proc/[0-9]*; do
+      pulse_pid="${proc_dir##*/}"
+      [[ -r "$proc_dir/cmdline" ]] || continue
+      cmdline="$( { tr '\0' ' ' < "$proc_dir/cmdline"; } 2>/dev/null || true)"
+      if [[ "$cmdline" == *"pulseaudio -n --daemonize=yes"* &&
+            "$cmdline" == *"--log-target=file:$state_dir/pulse.log"* ]]; then
+        kill -TERM "$pulse_pid" 2>/dev/null || true
+        stale_pulse_pids+=("$pulse_pid")
+      fi
+    done
+    sleep 0.2
+    for pulse_pid in "${stale_pulse_pids[@]}"; do
+      [[ -r "/proc/$pulse_pid/cmdline" ]] || continue
+      cmdline="$( { tr '\0' ' ' < "/proc/$pulse_pid/cmdline"; } 2>/dev/null || true)"
+      if [[ "$cmdline" == *"--log-target=file:$state_dir/pulse.log"* ]]; then
+        kill -KILL "$pulse_pid" 2>/dev/null || true
+      fi
+    done
 
     # Clean only this dedicated daemon's validated runtime after an unclean
     # Android process kill. No shared Termux PulseAudio state is touched.
@@ -182,6 +209,7 @@ ensure_audio_bridge() {
       pulseaudio -n --daemonize=yes --exit-idle-time=-1 \
       --log-target="file:$state_dir/pulse.log" \
       -L module-aaudio-sink \
+      -L module-sles-source \
       -L module-native-protocol-unix \
       -L 'module-native-protocol-tcp listen=127.0.0.1 port=4715 auth-ip-acl=127.0.0.1' || return 1
 
@@ -193,7 +221,14 @@ ensure_audio_bridge() {
 
   pulse_server_responding || return 1
   PULSE_SERVER=tcp:127.0.0.1:4715 \
-    timeout --kill-after=0.5 1 pactl set-default-sink AAudio_sink >/dev/null
+    timeout --kill-after=0.5 1 pactl set-default-sink AAudio_sink >/dev/null || return 1
+  pulse_source="$(PULSE_SERVER=tcp:127.0.0.1:4715 \
+    timeout --kill-after=0.5 1 pactl list short sources 2>/dev/null |
+    awk '$2 !~ /[.]monitor$/ { print $2; exit }')"
+  if [[ -n "$pulse_source" ]]; then
+    PULSE_SERVER=tcp:127.0.0.1:4715 \
+      timeout --kill-after=0.5 1 pactl set-default-source "$pulse_source" >/dev/null || return 1
+  fi
 }
 
 guest_audio_env=()
@@ -351,12 +386,14 @@ termux-x11-preference \
 
 termux-wake-lock >/dev/null 2>&1 || true
 
+x11_cold_started=0
 if ! DISPLAY="$display_number" xwininfo -root >/dev/null 2>&1; then
   rm -f "$termux_prefix/tmp/.X1-lock" "$termux_prefix/tmp/.X11-unix/X1"
   # Current Termux:X11 shared-buffer fixes allow the AHardwareBuffer path on
   # this device, avoiding a full CPU-side copy of every 1920x1200 frame.
   launch_detached "$state_dir/x11.pid" "$state_dir/x11.log" \
     termux-x11 "$display_number" -ac
+  x11_cold_started=1
 
   # Bring the Android display surface forward. This is intentionally allowed
   # to fail when the activity is already visible.
@@ -386,7 +423,14 @@ fi
 # surface attaches. Wait for a stable geometry so a cold start cannot capture
 # that temporary size and produce an off-center desktop.
 read_stable_geometry() {
-  local last_geometry="" stable_samples=0 sample=""
+  local last_geometry="" stable_samples=0 sample="" required_stable_samples=10
+  # A newly opened foldable activity can expose its configured portrait size
+  # for several seconds before Android supplies the landscape surface. Warm
+  # starts need only the short debounce; cold starts wait through that delayed
+  # orientation handoff so Weston is never built around the transient size.
+  if (( x11_cold_started == 1 )); then
+    required_stable_samples=40
+  fi
   geometry=""
   for _ in {1..100}; do
     sample="$(DISPLAY="$display_number" xwininfo -root 2>/dev/null |
@@ -398,7 +442,7 @@ read_stable_geometry() {
       last_geometry="$sample"
     fi
     geometry="$sample"
-    (( stable_samples >= 10 )) && return 0
+    (( stable_samples >= required_stable_samples )) && return 0
     sleep 0.1
   done
 }

@@ -3,6 +3,7 @@
 OA_COMPONENTS_LOCK="${PROJECT_ROOT:?}/manifest/components.lock"
 OA_PATCHES_LOCK="${PROJECT_ROOT:?}/manifest/patches.lock"
 OA_BUILD_DEPENDENCIES_LOCK="${PROJECT_ROOT:?}/manifest/build-dependencies.lock"
+OA_ARTIFACTS_LOCK="${PROJECT_ROOT:?}/manifest/artifacts.lock"
 
 component_record() {
   local requested="$1"
@@ -97,6 +98,30 @@ validate_build_dependency_lock() {
   done <"$OA_BUILD_DEPENDENCIES_LOCK"
 
   ((failures == 0))
+}
+
+validate_artifact_lock() {
+  local line=0 name version upstream expected_hash license extra failures=0
+  declare -A seen=()
+
+  while IFS='|' read -r name version upstream expected_hash license extra; do
+    line=$((line + 1))
+    [[ -n "$name" && "$name" != \#* ]] || continue
+    if [[ -n "${extra:-}" || ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ||
+          "$upstream" != https://* || ! "$expected_hash" =~ ^[0-9a-f]{64}$ ||
+          -z "$license" ]]; then
+      printf '%s:%d: malformed binary artifact record\n' "$OA_ARTIFACTS_LOCK" "$line" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    if [[ -n "${seen[$name]:-}" ]]; then
+      printf '%s:%d: duplicate binary artifact %s\n' "$OA_ARTIFACTS_LOCK" "$line" "$name" >&2
+      failures=$((failures + 1))
+    fi
+    seen[$name]=1
+  done < "$OA_ARTIFACTS_LOCK"
+
+  (( failures == 0 ))
 }
 
 validate_patch_lock() {

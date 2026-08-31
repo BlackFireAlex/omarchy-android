@@ -1,0 +1,58 @@
+#!/usr/bin/bash
+
+set -euo pipefail
+
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/voxtype"
+pid_file="$runtime_dir/pid"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/voxtype"
+log_file="$state_dir/daemon.log"
+model_dir="${XDG_DATA_HOME:-$HOME/.local/share}/voxtype/models"
+
+daemon_is_live() {
+  local pid cmdline
+  [[ -r "$pid_file" ]] || return 1
+  read -r pid < "$pid_file"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+  cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  [[ "$cmdline" == *voxtype* ]]
+}
+
+model_is_installed() {
+  [[ -d "$model_dir" ]] || return 1
+  find "$model_dir" -type f -size +1M -print -quit 2>/dev/null | grep -q .
+}
+
+case "${1:-start}" in
+  start)
+    command -v voxtype >/dev/null 2>&1 || exit 0
+    model_is_installed || exit 0
+    daemon_is_live && exit 0
+    mkdir -p "$runtime_dir" "$state_dir"
+    chmod 0700 "$runtime_dir" "$state_dir"
+    setsid -f /usr/bin/bash -c '
+      log_file="$1"
+      exec voxtype --no-hotkey daemon >>"$log_file" 2>&1
+    ' omarchy-voxtype "$log_file"
+    ;;
+  stop)
+    if daemon_is_live; then
+      read -r pid < "$pid_file"
+      kill -TERM "$pid"
+    fi
+    ;;
+  status)
+    if daemon_is_live; then
+      read -r pid < "$pid_file"
+      printf 'Voxtype daemon is running (PID %s).\n' "$pid"
+    elif model_is_installed; then
+      printf 'Voxtype model is installed, but its daemon is stopped.\n'
+      exit 1
+    else
+      printf 'Voxtype is ready; download a model to enable dictation.\n'
+    fi
+    ;;
+  *)
+    printf 'usage: %s {start|stop|status}\n' "$0" >&2
+    exit 2
+    ;;
+esac
