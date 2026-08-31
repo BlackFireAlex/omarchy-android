@@ -4,6 +4,7 @@ OA_COMPONENTS_LOCK="${PROJECT_ROOT:?}/manifest/components.lock"
 OA_PATCHES_LOCK="${PROJECT_ROOT:?}/manifest/patches.lock"
 OA_BUILD_DEPENDENCIES_LOCK="${PROJECT_ROOT:?}/manifest/build-dependencies.lock"
 OA_ARTIFACTS_LOCK="${PROJECT_ROOT:?}/manifest/artifacts.lock"
+OA_OCI_IMAGES_LOCK="${PROJECT_ROOT:?}/manifest/oci-images.lock"
 
 component_record() {
   local requested="$1"
@@ -120,6 +121,31 @@ validate_artifact_lock() {
     fi
     seen[$name]=1
   done < "$OA_ARTIFACTS_LOCK"
+
+  (( failures == 0 ))
+}
+
+validate_oci_image_lock() {
+  local line=0 name repository tag manifest_digest layer_digest extra failures=0
+  declare -A seen=()
+
+  while IFS='|' read -r name repository tag manifest_digest layer_digest extra; do
+    line=$((line + 1))
+    [[ -n "$name" && "$name" != \#* ]] || continue
+    if [[ -n "${extra:-}" || ! "$repository" =~ ^[a-z0-9._/-]+$ ||
+          ! "$tag" =~ ^[A-Za-z0-9._-]+$ ||
+          ! "$manifest_digest" =~ ^sha256:[0-9a-f]{64}$ ||
+          ! "$layer_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      printf '%s:%d: malformed OCI image record\n' "$OA_OCI_IMAGES_LOCK" "$line" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    if [[ -n "${seen[$name]:-}" ]]; then
+      printf '%s:%d: duplicate OCI image %s\n' "$OA_OCI_IMAGES_LOCK" "$line" "$name" >&2
+      failures=$((failures + 1))
+    fi
+    seen[$name]=1
+  done < "$OA_OCI_IMAGES_LOCK"
 
   (( failures == 0 ))
 }

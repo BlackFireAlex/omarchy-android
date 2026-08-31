@@ -47,6 +47,7 @@ done
 validate_component_lock
 validate_build_dependency_lock
 validate_artifact_lock
+validate_oci_image_lock
 validate_patch_lock
 
 packages_lock="$ROOT/manifest/packages-aarch64-0.1.0.lock"

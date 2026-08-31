@@ -50,7 +50,7 @@ the outer bundle plus SHA-256 sidecar under `.work/releases/`.
 
 `.github/workflows/build-image.yml` performs a clean, native ARM64 rebuild on
 GitHub's `ubuntu-24.04-arm` runner. It verifies the locked Arch Linux ARM OCI
-layer, fetches only the pinned source revisions, reapplies the reviewed patch
+manifest, fetches only the pinned source revisions, reapplies the reviewed patch
 series, rebuilds Mesa/Aquamarine/Hyprland, assembles and privacy-audits the
 guest, and uploads these workflow artifacts:
 
