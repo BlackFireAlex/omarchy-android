@@ -63,5 +63,7 @@ OMARCHY_PROOT=1 "$temporary_root/usr/local/bin/uwsm-app" -- true
 
 grep -Fx 'gawk' "$ROOT/builder/guest/runtime-packages.txt" >/dev/null
 grep -Fx 'wtype' "$ROOT/builder/guest/runtime-packages.txt" >/dev/null
+grep -F 'stop_orphans "pulseaudio -n --daemonize=yes"' \
+  "$ROOT/runtime/host/omarchy-android-stop" >/dev/null
 
 printf 'runtime template tests passed\n'

@@ -50,27 +50,31 @@ validate_artifact_lock
 validate_oci_image_lock
 validate_patch_lock
 
-packages_lock="$ROOT/manifest/packages-aarch64-0.1.0.lock"
-[[ -f "$packages_lock" ]] || {
-  printf 'missing release package inventory: %s\n' "$packages_lock" >&2
-  exit 1
-}
-package_count="$(grep -Evc '^[[:space:]]*(#|$)' "$packages_lock")"
-(( package_count == 555 )) || {
-  printf 'expected 555 release packages, found %s\n' "$package_count" >&2
-  exit 1
-}
-if grep -Ev '^[[:space:]]*(#|$)' "$packages_lock" | LC_ALL=C sort -cu; then
-  :
-else
-  printf 'release package inventory is not unique and bytewise sorted\n' >&2
-  exit 1
-fi
-if grep -Ev '^[[:space:]]*(#|$)' "$packages_lock" | \
-    grep -Ev '^[a-z0-9@._+:-]+ [^[:space:]]+$' >/dev/null; then
-  printf 'release package inventory contains an invalid line\n' >&2
-  exit 1
-fi
+for package_inventory in \
+  "$ROOT/manifest/packages-aarch64-0.1.0.lock:555" \
+  "$ROOT/manifest/packages-aarch64-edge.lock:556"; do
+  packages_lock="${package_inventory%:*}"
+  expected_package_count="${package_inventory##*:}"
+  [[ -f "$packages_lock" ]] || {
+    printf 'missing package inventory: %s\n' "$packages_lock" >&2
+    exit 1
+  }
+  package_count="$(grep -Evc '^[[:space:]]*(#|$)' "$packages_lock")"
+  (( package_count == expected_package_count )) || {
+    printf 'expected %s packages in %s, found %s\n' \
+      "$expected_package_count" "$packages_lock" "$package_count" >&2
+    exit 1
+  }
+  if ! grep -Ev '^[[:space:]]*(#|$)' "$packages_lock" | LC_ALL=C sort -cu; then
+    printf 'package inventory is not unique and bytewise sorted: %s\n' "$packages_lock" >&2
+    exit 1
+  fi
+  if grep -Ev '^[[:space:]]*(#|$)' "$packages_lock" | \
+      grep -Ev '^[a-z0-9@._+:-]+ [^[:space:]]+$' >/dev/null; then
+    printf 'package inventory contains an invalid line: %s\n' "$packages_lock" >&2
+    exit 1
+  fi
+done
 
 "$ROOT/tests/options.sh"
 "$ROOT/tests/runtime.sh"

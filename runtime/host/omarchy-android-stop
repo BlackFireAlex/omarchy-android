@@ -68,6 +68,7 @@ stop_orphans "--rootfs=" "/containers/$container/rootfs"
 stop_orphans "virgl_test_server_android" "/data/data/com.termux/r/.virgl-omarchy"
 stop_orphans "weston" "--socket=wayland-omarchy"
 stop_orphans "omarchy-process-guard" "$state_dir"
+stop_orphans "pulseaudio -n --daemonize=yes" "--log-target=file:$state_dir/pulse.log"
 
 # PipeWire probes have previously escaped a short-lived diagnostic PRoot and
 # spun forever. Remove only exact commands that still map this Omarchy rootfs.

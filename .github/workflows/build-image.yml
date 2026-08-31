@@ -16,7 +16,7 @@ on:
       - licenses/**
       - manifest/**
       - patches/**
-      - runtime/**
+      - runtime/guest/**
       - scripts/**
       - lib/**
 
@@ -61,6 +61,15 @@ jobs:
 
       - name: Rebuild sanitized ARM64 rootfs
         run: ./builder/ci/build-rootfs.sh "${{ steps.version.outputs.value }}"
+
+      - name: Upload package drift evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-drift-${{ steps.version.outputs.value }}
+          path: .work/ci-image-${{ steps.version.outputs.value }}/output/packages-aarch64-*.lock
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload image, manifest, inventory, and checksums
         uses: actions/upload-artifact@v7

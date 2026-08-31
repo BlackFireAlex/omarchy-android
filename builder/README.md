@@ -59,6 +59,11 @@ guest, and uploads these workflow artifacts:
 - the image manifest and SHA-256 checksums; and
 - the rootfs member list used by the structural audit.
 
+The generated closure must exactly match
+`manifest/packages-aarch64-edge.lock`. If Arch Linux ARM changes, CI fails and
+uploads the newly resolved inventory as a small `package-drift-*` artifact for
+review; it never silently publishes a different image.
+
 This job rebuilds the guest image. The installable release bundle additionally
 contains Android/Bionic host binaries (the patched Weston module and small
 Termux helpers), which remain built and tested from Termux by

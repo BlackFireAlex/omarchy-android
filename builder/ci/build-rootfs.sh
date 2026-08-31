@@ -70,6 +70,7 @@ container_started=1
 
 docker exec \
   -e OMARCHY_BUILD_JOBS="${OMARCHY_BUILD_JOBS:-4}" \
+  -e OMARCHY_PACKAGES_LOCK=/mnt/project/manifest/packages-aarch64-edge.lock \
   "$container_name" \
   /mnt/project/builder/ci/build-rootfs-container.sh \
     /mnt/project "$version" "/mnt/project/.work/ci-image-$version"
