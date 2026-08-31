@@ -26,7 +26,7 @@ Termux:X11, PRoot Distro, Weston, and a patched native ARM64 Hyprland stack.
   approximately 4 GB; the verified download is approximately 1.1 GB.
 - An internet connection in Termux.
 - Direct KGSL/Turnip acceleration requires a compatible Qualcomm Adreno GPU.
-  The accelerated path in `v0.1.0` was validated on Adreno 840; other devices
+  The accelerated path was validated on Adreno 840; other devices
   may use the slower compatibility renderer.
 
 ### 1. Install the Android apps
@@ -82,6 +82,9 @@ The installer downloads a checksum-verified ARM64 image, creates a new
 `omarchy-android` PRoot container, and leaves existing containers alone. Keep
 Termux open while it finishes.
 
+Everything is precompiled. The phone downloads and verifies the release
+bundle; it does not compile Mesa, Hyprland, Weston, or Omarchy.
+
 ### 6. Start the desktop
 
 ```bash
@@ -95,7 +98,7 @@ Termux:X11 opens automatically. To stop or inspect the desktop later, use:
 ~/.local/share/omarchy-android/bin/omarchy-android status
 ```
 
-## What works in v0.1.0
+## What works
 
 - Interactive, dry-run, and fully noninteractive installation.
 - Native ARM64 userspace; no QEMU CPU emulation.
@@ -114,7 +117,7 @@ Termux:X11 opens automatically. To stop or inspect the desktop later, use:
 - Chromium displays an unsupported-command-line warning because the Linux
   process and GPU sandboxes cannot be used with this PRoot/KGSL path.
 - Chromium rendering is GPU accelerated, but hardware video decode and encode
-  are not enabled in `v0.1.0`.
+  are not enabled yet.
 - PRoot filesystem translation is slower than a rooted chroot, and performance
   varies by device and Android build.
 - This environment has no systemd PID 1. Omarchy services that require a real

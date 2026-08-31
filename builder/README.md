@@ -64,7 +64,16 @@ The generated closure must exactly match
 uploads the newly resolved inventory as a small `package-drift-*` artifact for
 review; it never silently publishes a different image.
 
-This job rebuilds the guest image. The installable release bundle additionally
-contains Android/Bionic host binaries (the patched Weston module and small
-Termux helpers), which remain built and tested from Termux by
-`host/build-release.sh`.
+Every push to `main` rebuilds the guest image. A semantic release tag such as
+`v0.1.1` additionally downloads the checksum-pinned Android/Bionic host payload,
+assembles the complete installer bundle, publishes both the bundle and SHA-256
+sidecar as a GitHub Release, verifies GitHub's uploaded-asset digest, and then
+atomically updates `manifest/release.lock` on `main`. End users only download
+the resulting precompiled bundle; they do not run this build pipeline.
+
+The host payload contains only the patched Weston module, two small Termux
+helpers, and their required license texts. It was extracted and byte-verified
+from the accepted `v0.1.0` release by `host/package-host-bootstrap.sh`; its URL,
+checksum, and source-bundle checksum are locked in
+`manifest/host-artifacts.lock`. Future host changes must be rebuilt and tested
+from Termux before publishing and pinning a new payload.

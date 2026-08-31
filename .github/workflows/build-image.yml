@@ -10,6 +10,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - v*
     paths:
       - .github/workflows/build-image.yml
       - builder/**
@@ -31,6 +33,9 @@ jobs:
   image:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -45,13 +50,20 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          if [[ -n "$REQUESTED_VERSION" ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            [[ "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]
+            release=true
+          elif [[ -n "$REQUESTED_VERSION" ]]; then
             version="$REQUESTED_VERSION"
+            release=false
           else
             version="edge-${GITHUB_SHA:0:12}"
+            release=false
           fi
           [[ "$version" =~ ^[A-Za-z0-9._-]+$ ]]
           printf 'value=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'release=%s\n' "$release" >> "$GITHUB_OUTPUT"
 
       - name: Report native runner capacity
         run: |
@@ -61,6 +73,15 @@ jobs:
 
       - name: Rebuild sanitized ARM64 rootfs
         run: ./builder/ci/build-rootfs.sh "${{ steps.version.outputs.value }}"
+
+      - name: Assemble complete installable release bundle
+        if: steps.version.outputs.release == 'true'
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          ./builder/ci/assemble-bundle.sh \
+            "$version" \
+            "$GITHUB_WORKSPACE/.work/ci-image-$version/output" \
+            "$GITHUB_WORKSPACE/.work/ci-release-$version"
 
       - name: Upload package drift evidence
         if: failure()
@@ -79,3 +100,121 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+      - name: Upload complete release bundle for publication
+        if: steps.version.outputs.release == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: omarchy-android-release-${{ steps.version.outputs.value }}
+          path: .work/ci-release-${{ steps.version.outputs.value }}/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  publish:
+    name: Publish installable release
+    needs: image
+    if: needs.image.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged release source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download complete release bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: omarchy-android-release-${{ needs.image.outputs.version }}
+          path: release
+
+      - name: Verify release bundle and sidecar
+        env:
+          VERSION: ${{ needs.image.outputs.version }}
+        run: |
+          asset="omarchy-android-aarch64-$VERSION.bundle.tar"
+          cd release
+          [[ -f "$asset" && -f "$asset.sha256" ]]
+          sha256sum -c "$asset.sha256"
+          tar -tf "$asset" > bundle-members.txt
+          while IFS= read -r member; do
+            case "$member" in
+              /*|../*|*/../*|*/..) printf 'Unsafe release member: %s\n' "$member" >&2; exit 1 ;;
+            esac
+          done < bundle-members.txt
+          for required in \
+            ./BUNDLE-MANIFEST \
+            ./SHA256SUMS \
+            ./rootfs.tar.xz \
+            "./manifest/packages-aarch64-$VERSION.lock" \
+            ./host/bin/omarchy-process-guard \
+            ./host/bin/omarchy-x11-keyboard \
+            ./host/opt/weston/lib/libweston-14/x11-backend.so; do
+            grep -qxF "$required" bundle-members.txt
+          done
+          rm bundle-members.txt
+
+      - name: Publish immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.image.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          asset="omarchy-android-aarch64-$VERSION.bundle.tar"
+          bundle="$GITHUB_WORKSPACE/release/$asset"
+          sidecar="$bundle.sha256"
+          bundle_sha256="$(sha256sum "$bundle")"
+          bundle_sha256="${bundle_sha256%% *}"
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            for path in "$bundle" "$sidecar"; do
+              name="${path##*/}"
+              remote_digest="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+                --jq ".assets[] | select(.name == \"$name\") | .digest")"
+              if [[ -z "$remote_digest" ]]; then
+                gh release upload "$tag" "$path" --repo "$GITHUB_REPOSITORY"
+              elif [[ "$remote_digest" != "sha256:$(sha256sum "$path" | awk '{print $1}')" ]]; then
+                printf 'Refusing to replace mismatched release asset %s.\n' "$name" >&2
+                exit 1
+              fi
+            done
+          else
+            notes_file="$(mktemp)"
+            cat > "$notes_file" <<EOF
+          Precompiled Omarchy Android $tag for ARM64 phones and tablets.
+
+          Users do not compile Mesa, Hyprland, Weston, or Omarchy. Follow the README from the top, then run the installer. The installer verifies the bundle checksum before extracting it.
+
+          This is an unofficial port; upstream project licenses and trademarks remain with their owners.
+          EOF
+            gh release create "$tag" "$bundle" "$sidecar" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --latest \
+              --title "Omarchy Android $tag" \
+              --notes-file "$notes_file"
+            rm "$notes_file"
+          fi
+
+          remote_digest="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq ".assets[] | select(.name == \"$asset\") | .digest")"
+          [[ "$remote_digest" == "sha256:$bundle_sha256" ]]
+          printf 'bundle_sha256=%s\n' "$bundle_sha256" >> "$GITHUB_ENV"
+
+      - name: Point the installer at the published release
+        env:
+          VERSION: ${{ needs.image.outputs.version }}
+        run: |
+          git fetch origin main
+          git switch --force-create main origin/main
+          ./scripts/update-release-lock.sh "$VERSION" "$GITHUB_REPOSITORY" "$bundle_sha256"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add manifest/release.lock
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Point installer at v$VERSION"
+          git push origin HEAD:main

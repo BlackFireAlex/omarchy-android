@@ -63,6 +63,8 @@ OMARCHY_PROOT=1 "$temporary_root/usr/local/bin/uwsm-app" -- true
 
 grep -Fx 'gawk' "$ROOT/builder/guest/runtime-packages.txt" >/dev/null
 grep -Fx 'wtype' "$ROOT/builder/guest/runtime-packages.txt" >/dev/null
+grep -F 'android-host|0.1.0|https://github.com/BlackFireAlex/omarchy-android/releases/download/' \
+  "$ROOT/manifest/host-artifacts.lock" >/dev/null
 grep -F 'stop_orphans "pulseaudio -n --daemonize=yes"' \
   "$ROOT/runtime/host/omarchy-android-stop" >/dev/null
 
