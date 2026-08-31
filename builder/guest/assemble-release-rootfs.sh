@@ -83,6 +83,9 @@ fc-cache -f
 
 # Generate the exact current-theme tree used by both Hyprland and Quickshell.
 # Headless mode performs no IPC, service startup, or desktop notification.
+# The tree above is deliberately copied by root, so hand the clean home to its
+# final user before running a command that atomically replaces current-theme.
+chown -R 1000:1000 "$home"
 runuser -u omarchy -- env \
   HOME="$home" \
   USER=omarchy \
@@ -93,6 +96,11 @@ runuser -u omarchy -- env \
   OMARCHY_THEME_HEADLESS=1 \
   OMARCHY_THEME_SKIP_BACKGROUND=1 \
   omarchy-theme-set tokyo-night
+
+[[ -s "$home/.local/state/omarchy/current/theme.name" ]] || {
+  printf 'Default Omarchy theme initialization failed.\n' >&2
+  exit 1
+}
 
 for background in "$home/.local/state/omarchy/current/theme/backgrounds/"*; do
   [[ -f "$background" ]] || continue

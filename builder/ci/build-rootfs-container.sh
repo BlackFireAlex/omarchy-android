@@ -111,7 +111,16 @@ if [[ -n "${OMARCHY_PACKAGES_LOCK:-}" ]]; then
     printf 'OMARCHY_PACKAGES_LOCK is not an absolute file: %s\n' "$OMARCHY_PACKAGES_LOCK" >&2
     exit 2
   }
-  diff -u "$OMARCHY_PACKAGES_LOCK" "$package_inventory"
+  expected_inventory_sha256="$(sha256sum "$OMARCHY_PACKAGES_LOCK")"
+  expected_inventory_sha256="${expected_inventory_sha256%% *}"
+  actual_inventory_sha256="$(sha256sum "$package_inventory")"
+  actual_inventory_sha256="${actual_inventory_sha256%% *}"
+  if [[ "$actual_inventory_sha256" != "$expected_inventory_sha256" ]]; then
+    printf 'Release package closure does not match the pinned inventory.\n' >&2
+    printf 'Expected SHA256: %s\nActual SHA256:   %s\n' \
+      "$expected_inventory_sha256" "$actual_inventory_sha256" >&2
+    exit 1
+  fi
 fi
 
 # Enforce the same privacy boundary as the phone release builder before any
