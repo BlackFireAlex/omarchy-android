@@ -37,7 +37,10 @@ pacman -D --asdeps "${installed_packages[@]}" >/dev/null
 pacman -D --asexplicit "${runtime_packages[@]}" >/dev/null
 
 while true; do
-  pacman -Qdtq > "$temporary_root/orphaned" || true
+  # Use -tt so build tools retained only as optional dependencies of a runtime
+  # package are still considered removable. Every optional component intended
+  # for the desktop is already an explicit root in runtime-packages.txt.
+  pacman -Qdttq > "$temporary_root/orphaned" || true
   mapfile -t orphaned < "$temporary_root/orphaned"
   (( ${#orphaned[@]} > 0 )) || break
   pacman -Rns --noconfirm "${orphaned[@]}"

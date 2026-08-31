@@ -63,7 +63,7 @@ jobs:
         run: ./builder/ci/build-rootfs.sh "${{ steps.version.outputs.value }}"
 
       - name: Upload image, manifest, inventory, and checksums
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: omarchy-android-rootfs-${{ steps.version.outputs.value }}
           path: .work/ci-image-${{ steps.version.outputs.value }}/output/

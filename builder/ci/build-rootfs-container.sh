@@ -158,6 +158,7 @@ XZ_OPT='-T1 -3' tar \
   --exclude='./run/*' \
   --exclude='./var/tmp' \
   --exclude='./var/tmp/*' \
+  --exclude='./.dockerenv' \
   --exclude='./etc/hostname' \
   --exclude='./etc/hosts' \
   --exclude='./etc/resolv.conf' \
