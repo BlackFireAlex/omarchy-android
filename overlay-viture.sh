@@ -37,7 +37,7 @@ EXTRAS_DST="$ROOTFS/home/omarchy/omarchy-android-extras"
 revert() {
   info "Reverting host runtime"
   [[ -f "$OA_PREFIX/omarchy-android-start.orig" ]] && mv -f "$OA_PREFIX/omarchy-android-start.orig" "$OA_PREFIX/bin/omarchy-android-start"
-  rm -f "$OA_PREFIX/device-presets.sh"
+  rm -f "$OA_PREFIX/bin/device-presets.sh"
   info "Reverting guest config"
   for f in input.lua input/pointer.lua monitors.lua hyprland.lua; do
     [[ -f "$HYPR_DST/$f.orig" ]] && mv -f "$HYPR_DST/$f.orig" "$HYPR_DST/$f"
@@ -55,7 +55,7 @@ info "Guest rootfs: $ROOTFS"
 
 # 1) Host runtime: device-presets module + patched start script
 info "Installing device-presets.sh and patched omarchy-android-start (host)"
-install -m 0644 "$PROJECT_ROOT/runtime/host/device-presets.sh" "$OA_PREFIX/device-presets.sh"
+install -m 0755 "$PROJECT_ROOT/runtime/host/device-presets.sh" "$OA_PREFIX/bin/device-presets.sh"
 if [[ -f "$OA_PREFIX/bin/omarchy-android-start" ]]; then
   cp -f "$OA_PREFIX/bin/omarchy-android-start" "$OA_PREFIX/bin/omarchy-android-start.orig"
 fi

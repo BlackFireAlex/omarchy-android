@@ -174,6 +174,7 @@ install_host_runtime() {
     "$PROJECT_ROOT/runtime/host/omarchy-android-stop" \
     "$PROJECT_ROOT/runtime/host/omarchy-android-status" \
     "$PROJECT_ROOT/runtime/host/omarchy-android-hyprctl" \
+    "$PROJECT_ROOT/runtime/host/device-presets.sh" \
     "$OA_PREFIX/bin/"
   install -m 0755 \
     "$unpacked/host/bin/omarchy-process-guard" \
