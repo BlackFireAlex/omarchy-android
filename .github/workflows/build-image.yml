@@ -8,10 +8,8 @@ on:
         required: false
         type: string
   push:
-    branches:
-      - main
     tags:
-      - v*
+      - 'v*'
 
 permissions:
   contents: read
