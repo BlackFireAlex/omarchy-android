@@ -39,6 +39,7 @@ for helper in "$bin_dir"/*; do
 done
 
 # 3. Ensure ~/.local/bin precedes the systemd-based copies on PATH.
+# shellcheck disable=SC2016  # literal text written to the guest bashrc
 if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$bashrc" 2>/dev/null; then
   printf '\n# Omarchy Android extras\n%s\n' 'export PATH="$HOME/.local/bin:$PATH"' >> "$bashrc"
   echo "  - prepended ~/.local/bin to PATH in $bashrc"

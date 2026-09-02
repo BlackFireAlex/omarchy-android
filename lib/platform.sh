@@ -44,6 +44,7 @@ platform_preflight() {
     # shellcheck source=../runtime/host/device-presets.sh
     # shellcheck disable=SC1091
     source "$PROJECT_ROOT/runtime/host/device-presets.sh"
+    # shellcheck disable=SC2034  # recorded for the install manifest / diagnostics
     OA_DEVICE_PROFILE="${OAD_DEVICE_PROFILE:-unknown}"
   fi
 
