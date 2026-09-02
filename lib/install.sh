@@ -133,7 +133,7 @@ verify_and_extract_bundle() {
 }
 
 write_runtime_config() {
-  local gpu_mode resolution refresh audio
+  local gpu_mode resolution refresh scale audio
   case "$OA_GPU" in
     auto)
       if [[ -r /dev/kgsl-3d0 && -w /dev/kgsl-3d0 ]]; then gpu_mode=kgsl; else gpu_mode=virgl; fi
@@ -141,8 +141,13 @@ write_runtime_config() {
     kgsl) gpu_mode=kgsl ;;
     software) gpu_mode=virgl ;;
   esac
-  resolution="$OA_RESOLUTION"
-  if [[ "$OA_REFRESH" == auto ]]; then refresh=120000; else refresh=$((OA_REFRESH * 1000)); fi
+  # Emit 'auto' for any display value the user did NOT explicitly pass so the
+  # start-time device-presets module resolves a per-device tuning (VITURE
+  # headset -> native-panel preset; phone -> stock defaults). An explicit
+  # --resolution/--refresh/--scale is written verbatim and wins.
+  if [[ "$OA_RESOLUTION_SET" == true ]]; then resolution="$OA_RESOLUTION"; else resolution=auto; fi
+  if [[ "$OA_REFRESH_SET" == true ]]; then refresh=$((OA_REFRESH * 1000)); else refresh=auto; fi
+  if [[ "$OA_SCALE_SET" == true ]]; then scale="$OA_SCALE"; else scale=auto; fi
   if [[ "$OA_AUDIO" == true ]]; then audio=1; else audio=0; fi
 
   cat > "$OA_PREFIX/config/runtime.conf" <<EOF
@@ -152,7 +157,7 @@ OMARCHY_GPU_MODE=$gpu_mode
 OMARCHY_COMPOSITOR_GL_DRIVER=kgsl
 OMARCHY_DISPLAY_RESOLUTION=$resolution
 OMARCHY_REFRESH_MHZ=$refresh
-OMARCHY_SCALE=$OA_SCALE
+OMARCHY_SCALE=$scale
 OMARCHY_KEYBOARD_LAYOUT=$OA_KEYBOARD
 OMARCHY_SHARE=$OA_SHARE
 OMARCHY_AUDIO=$audio
@@ -295,6 +300,7 @@ gpu=$OA_GPU
 resolution=$OA_RESOLUTION
 refresh=$OA_REFRESH
 scale=$OA_SCALE
+display=${OA_DEVICE_PROFILE:-unknown}
 keyboard=$OA_KEYBOARD
 sharing=$OA_SHARE
 audio=$OA_AUDIO

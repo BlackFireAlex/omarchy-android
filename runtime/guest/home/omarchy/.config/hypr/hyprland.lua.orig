@@ -36,22 +36,5 @@ require("hypr.autostart")
 -- Toggle config flags dynamically.
 require("default.hypr.toggles")
 
--- DeX/glasses: on fractional monitor scale (e.g. the Luma Ultra at 1.25) X11
--- clients would otherwise present through XWayland and go soft. Present X apps
--- at native DPI and let Hyprland do the upscale, keeping text crisp.
-hl.config({ xwayland = { force_zero_scaling = true } })
-
--- Device-aware pointer presets (per-device sensitivity / scroll). Safe to load:
--- it degrades to the shared input.lua baseline on any Hyprland build.
-dofile(os.getenv("HOME") .. "/.config/hypr/input/pointer.lua")
-
--- Optional feature extras installed under ~/omarchy-android-extras (reminders
--- daemon, battery/notification shims, agents-usage regenerator). Loaded only
--- when present so a stock tree runs untouched.
-local extras_autostart = os.getenv("HOME") .. "/omarchy-android-extras/autostart-addons.lua"
-if io.open(extras_autostart, "r") then
-  dofile(extras_autostart)
-end
-
 -- Add any other personal Hyprland configuration below.
 -- o.window("qemu", { workspace = "5" })

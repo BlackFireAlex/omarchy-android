@@ -3,6 +3,14 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# Device-aware display/input presets (VITURE Neckband/Luma vs. stock phone).
+# Sourced before the generated runtime.conf so an explicit value in
+# config/runtime.conf or the environment overrides a detected preset.
+# shellcheck source=../host/device-presets.sh
+if [[ -f "$script_dir/device-presets.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$script_dir/device-presets.sh"
+fi
 config_file="${OMARCHY_ANDROID_CONFIG:-$script_dir/../config/runtime.conf}"
 if [[ -r "$config_file" ]]; then
   # shellcheck source=/dev/null
@@ -52,6 +60,24 @@ ui_scale="${OMARCHY_SCALE:-2}"
 share_mode="${OMARCHY_SHARE:-none}"
 audio_enabled="${OMARCHY_AUDIO:-1}"
 keyboard_layout="${OMARCHY_KEYBOARD_LAYOUT:-auto}"
+pointer_left_handed="${OMARCHY_POINTER_LEFT_HANDED:-0}"
+
+# Resolve any 'auto' display sentinel against the device preset detected above
+# (VITURE headset -> native-panel WxH@Hz / 1x scale; phone -> stock defaults).
+# An explicit WxH / Hz / scale from runtime.conf or the environment is kept.
+odp_resolve_display display_resolution refresh_mhz ui_scale
+# The resolution is re-read from the environment below, so publish the resolved
+# native-panel WxH there. An 'auto' phone stays auto and keeps the dynamic
+# Termux:X11 geometry path.
+if [[ "$display_resolution" != auto ]]; then
+  export OMARCHY_DISPLAY_RESOLUTION="$display_resolution"
+fi
+# Fractional monitor-scale comfort for dense panels; defaults to the base scale.
+if [[ -n "${OAD_DEVICE_MONITOR_SCALE:-}" ]]; then
+  monitor_scale="${OMARCHY_MONITOR_SCALE:-$OAD_DEVICE_MONITOR_SCALE}"
+else
+  monitor_scale="${OMARCHY_MONITOR_SCALE:-$ui_scale}"
+fi
 
 if [[ ! "$process_limit" =~ ^[0-9]+$ ]] || (( process_limit < 8 )); then
   echo "OMARCHY_PROCESS_LIMIT must be an integer of at least 8." >&2
@@ -601,6 +627,8 @@ launch_detached "$state_dir/proot.pid" "$state_dir/hyprland.log" \
   -e OMARCHY_OUTPUT_HEIGHT="$height" \
   -e OMARCHY_REFRESH_MHZ="$refresh_mhz" \
   -e OMARCHY_SCALE="$ui_scale" \
+  -e OMARCHY_MONITOR_SCALE="$monitor_scale" \
+  -e OMARCHY_POINTER_LEFT_HANDED="$pointer_left_handed" \
   -e OMARCHY_KEYBOARD_LAYOUT="$keyboard_layout" \
   -e NO_AT_BRIDGE=1 \
   -e QT_ACCESSIBILITY=0 \
@@ -736,6 +764,9 @@ if ! $final_stack_live; then
   exit 1
 fi
 echo "Omarchy started fullscreen at ${width}x${height}."
+if [[ "${OAD_DEVICE_PROFILE:-unknown}" != unknown ]]; then
+  echo "Device profile: ${OAD_DEVICE_NAME} (${OAD_DEVICE_RESOLUTION} @ $((refresh_mhz / 1000)) Hz, scale ${ui_scale})."
+fi
 if (( unlimited_processes == 1 )); then
   echo "Android child-process restriction: disabled (no synthetic process ceiling)."
 else

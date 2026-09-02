@@ -75,3 +75,18 @@ llvm-libs
 libclc
 mesa-utils
 vulkan-tools
+#
+# Omarchy Android feature extras (device-optimization batch). These are all in
+# the Arch Linux ARM official repositories so a clean image builder resolves
+# them without needing the AUR. AUR-only helpers (gpu-screen-recorder, tensaku,
+# lazydocker, paru) are deliberately NOT listed here to keep the clean image
+# reproducible; install those from the AUR in the guest when needed.
+tesseract
+tesseract-data-eng
+hyprpicker
+zbar
+wf-recorder
+hyprsunset
+dua-cli
+restic
+base-devel
