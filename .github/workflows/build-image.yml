@@ -8,19 +8,8 @@ on:
         required: false
         type: string
   push:
-    branches:
-      - main
     tags:
-      - v*
-    paths:
-      - .github/workflows/build-image.yml
-      - builder/**
-      - licenses/**
-      - manifest/**
-      - patches/**
-      - runtime/guest/**
-      - scripts/**
-      - lib/**
+      - 'v*'
 
 permissions:
   contents: read

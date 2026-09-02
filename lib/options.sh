@@ -5,6 +5,10 @@
 OA_ACTION=install
 OA_GPU=auto
 OA_RESOLUTION=auto
+OA_DEVICE_PROFILE=unknown
+OA_RESOLUTION_SET=false
+OA_REFRESH_SET=false
+OA_SCALE_SET=false
 OA_REFRESH=auto
 OA_SCALE=2
 OA_KEYBOARD=auto
@@ -73,18 +77,21 @@ parse_options() {
       --resolution)
         shift
         OA_RESOLUTION="$(option_value --resolution "${1:-}")"
+        OA_RESOLUTION_SET=true
         ;;
-      --resolution=*) OA_RESOLUTION="${1#*=}" ;;
+      --resolution=*) OA_RESOLUTION="${1#*=}"; OA_RESOLUTION_SET=true ;;
       --refresh)
         shift
         OA_REFRESH="$(option_value --refresh "${1:-}")"
+        OA_REFRESH_SET=true
         ;;
-      --refresh=*) OA_REFRESH="${1#*=}" ;;
+      --refresh=*) OA_REFRESH="${1#*=}"; OA_REFRESH_SET=true ;;
       --scale)
         shift
         OA_SCALE="$(option_value --scale "${1:-}")"
+        OA_SCALE_SET=true
         ;;
-      --scale=*) OA_SCALE="${1#*=}" ;;
+      --scale=*) OA_SCALE="${1#*=}"; OA_SCALE_SET=true ;;
       --keyboard)
         shift
         OA_KEYBOARD="$(option_value --keyboard "${1:-}")"
@@ -160,6 +167,7 @@ Resolved configuration:
   resolution:   $OA_RESOLUTION
   refresh:      $OA_REFRESH
   scale:        $OA_SCALE
+  device:       $OA_DEVICE_PROFILE
   keyboard:     $OA_KEYBOARD
   sharing:      $OA_SHARE
   audio:        $OA_AUDIO

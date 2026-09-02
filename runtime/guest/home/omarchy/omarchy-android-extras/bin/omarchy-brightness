@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#
+# omarchy-brightness — Android display-brightness shim for the Omarchy PRoot guest.
+#
+# The upstream display/keyboard brightness tooling used brightnessctl sysfs,
+# which does not exist for the Android panel. This thin shim talks to Android
+# through Termux:Brightness (termux-brightness / termux-api) when available and
+# is a safe no-op that reports "unavailable" otherwise.
+#
+#   omarchy-brightness           # print current brightness (0-255 scale)
+#   omarchy-brightness set <val> # set brightness (0-255)
+#   omarchy-brightness max       # max value (255)
+
+set -euo pipefail
+
+BRIGHTNESS_CMD=""
+if command -v termux-brightness >/dev/null 2>&1; then
+  BRIGHTNESS_CMD="$(command -v termux-brightness)"
+elif command -v termux-brightness-cli >/dev/null 2>&1; then
+  BRIGHTNESS_CMD="$(command -v termux-brightness-cli)"
+fi
+
+if [[ -z "$BRIGHTNESS_CMD" ]]; then
+  echo "Brightness control is unavailable (install Termux:API + termux-brightness)." >&2
+  exit 3
+fi
+
+case "${1:-get}" in
+  get) "$BRIGHTNESS_CMD" 2>/dev/null || echo unknown ;;
+  set)
+    [[ $# -ge 2 ]] || { echo "usage: $0 set <0-255>" >&2; exit 2; }
+    "$BRIGHTNESS_CMD" --value "$2" 2>/dev/null || exit 1
+    ;;
+  max) echo 255 ;;
+  *) echo "usage: $0 [get|set <0-255>|max]" >&2; exit 2 ;;
+esac

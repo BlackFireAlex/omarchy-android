@@ -38,6 +38,16 @@ platform_preflight() {
     fi
   fi
 
+  # Detect a VITURE headset host so the installer can record and emit the
+  # per-device display/input preset instead of hard-coding phone tuning.
+  if [[ -f "$PROJECT_ROOT/runtime/host/device-presets.sh" ]]; then
+    # shellcheck source=../runtime/host/device-presets.sh
+    # shellcheck disable=SC1091
+    source "$PROJECT_ROOT/runtime/host/device-presets.sh"
+    # shellcheck disable=SC2034  # recorded for the install manifest / diagnostics
+    OA_DEVICE_PROFILE="${OAD_DEVICE_PROFILE:-unknown}"
+  fi
+
   if [[ "$OA_GPU" == kgsl && ! -e /dev/kgsl-3d0 ]]; then
     die "--gpu kgsl was requested, but /dev/kgsl-3d0 is unavailable."
   fi
