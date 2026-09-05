@@ -78,5 +78,6 @@ for package_inventory in \
 done
 
 "$ROOT/tests/options.sh"
+"$ROOT/tests/install.sh"
 "$ROOT/tests/runtime.sh"
 printf 'validation passed\n'
