@@ -66,7 +66,7 @@ download_release_bundle() {
   asset="$(release_field asset)" || die 'Release lock has no asset name.'
   target="$OA_INSTALL_TEMP/$asset"
 
-  info "Downloading verified stable ARM64 release"
+  info "Downloading verified stable ARM64 release" >&2
   if ! curl --fail --location --retry 3 --output "$target" "$url"; then
     die 'Release download failed. Check the network connection or pass a local file with --bundle PATH.'
   fi
