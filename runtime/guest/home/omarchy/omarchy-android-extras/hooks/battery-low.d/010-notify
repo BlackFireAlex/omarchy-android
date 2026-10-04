@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#
+# Sample battery-low hook for the Omarchy Android port. Notifies when the
+# Android battery (via termux-battery-status) falls at or below the threshold.
+# Runs from omarchy-battery-low; safe no-op when the battery shim is missing.
+
+set -euo pipefail
+
+low="${OMARCHY_BATTERY_LOW_LEVEL:-20}"
+if command -v omarchy-battery-status >/dev/null 2>&1; then
+  pct="$(omarchy-battery-status 2>/dev/null | sed -n 's/^percentage=//p' | head -n1)"
+  if [[ "$pct" =~ ^[0-9]+$ ]] && (( pct <= low )); then
+    notify-send -a Omarchy "Low battery" "Battery is at ${pct}%." >/dev/null 2>&1 || true
+  fi
+fi
+exit 0

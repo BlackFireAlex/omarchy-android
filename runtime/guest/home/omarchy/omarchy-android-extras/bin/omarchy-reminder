@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#
+# omarchy-reminder — PROot-friendly reminder client for Omarchy Android.
+#
+# The original Omarchy reminder used `systemd-run --user --on-active` to
+# schedule a timed notify-send. There is no systemd in the PRoot guest, so this
+# client writes a reminder into a JSON state file and lets the foreground
+# omarchy-reminder-daemon (started from autostart-addons.lua) fire it with
+# notify-send. Mirrors the shipped CLI:
+#   omarchy reminder set 5 "stand up"
+#   omarchy reminder list
+#   omarchy reminder clear
+# The pending list lives at ~/.local/state/omarchy/reminders.json.
+
+set -euo pipefail
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+reminders_file="$state_dir/reminders.json"
+lock_file="$state_dir/reminders.lock"
+
+mkdir -p "$state_dir"
+
+init_store() {
+  [[ -f "$reminders_file" ]] || printf '[]\n' > "$reminders_file"
+}
+
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+usage() {
+  cat <<'EOF'
+usage: omarchy reminder set <minutes> <message...>
+       omarchy reminder list
+       omarchy reminder clear
+EOF
+}
+
+case "${1:-list}" in
+  set)
+    (( $# >= 3 )) || { usage; exit 2; }
+    minutes="$2"
+    message="${*:3}"
+    [[ "$minutes" =~ ^[0-9]+$ ]] || { echo "minutes must be a non-negative integer" >&2; exit 2; }
+    due_epoch=$(( $(date +%s) + minutes * 60 ))
+    id="$(date +%s)-$$"
+    {
+      flock -x 9
+      init_store
+      escaped="$(json_escape "$message")"
+      jq --arg id "$id" --arg title "Reminder" --arg body "$escaped" \
+         --argjson due "$due_epoch" \
+         '. + [{ id: $id, title: "Reminder", body: $body, due_epoch: $due }]' \
+         "$reminders_file" > "$reminders_file.tmp" && mv "$reminders_file.tmp" "$reminders_file"
+    } 9>"$lock_file"
+    echo "Reminder set in $minutes minute(s): $message"
+    ;;
+  list)
+    flock -x 9
+    init_store
+    if command -v jq >/dev/null 2>&1; then
+      jq -r '.[] | "\(.due_epoch) \(.title): \(.body)"' "$reminders_file" 2>/dev/null \
+        || true
+    else
+      cat "$reminders_file"
+    fi
+    ;;
+  clear)
+    flock -x 9
+    init_store
+    printf '[]\n' > "$reminders_file"
+    echo "All reminders cleared."
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

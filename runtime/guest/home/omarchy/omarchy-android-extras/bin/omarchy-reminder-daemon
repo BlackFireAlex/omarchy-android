@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#
+# omarchy-reminder-daemon — foreground reminder scheduler for Omarchy Android.
+#
+# Replaces the systemd user timer used upstream (`systemd-run --time-on-active`)
+# with a lightweight foreground sleep-loop started from autostart-addons.lua.
+# It watches ~/.local/state/omarchy/reminders.json and, when a reminder becomes
+# due, fires `notify-send`. Modeled on the fork's omarchy-voxtype-daemon pattern
+# so the Android session runs it as a plain background process.
+#
+#   start | stop | status
+
+set -euo pipefail
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+reminders_file="$state_dir/reminders.json"
+lock_file="$state_dir/reminders.lock"
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+pid_file="$runtime_dir/omarchy-reminder-daemon.pid"
+log_file="$state_dir/reminder-daemon.log"
+
+daemon_is_live() {
+  local pid cmdline
+  [[ -r "$pid_file" ]] || return 1
+  read -r pid < "$pid_file"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+  cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  [[ "$cmdline" == *omarchy-reminder-daemon* ]]
+}
+
+dispatch_due() {
+  mkdir -p "$state_dir"
+  [[ -f "$reminders_file" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  now="$(date +%s)"
+  {
+    flock -x 9
+    while read -r due; do
+      [[ -z "$due" ]] && continue
+      title="$(jq -r --argjson d "$due" '.[] | select(.due_epoch==$d) | .title // "Reminder"' "$reminders_file" | head -n1)"
+      body="$(jq -r --argjson d "$due" '.[] | select(.due_epoch==$d) | .body // ""' "$reminders_file" | head -n1)"
+      notify-send -a Omarchy "$title" "$body" >/dev/null 2>&1 || true
+      jq --argjson d "$due" 'map(select(.due_epoch != $d))' "$reminders_file" \
+        > "$reminders_file.tmp" && mv "$reminders_file.tmp" "$reminders_file"
+    done < <(jq -r '.[].due_epoch | select(. <= '"$now"')' "$reminders_file")
+  } 9>"$lock_file"
+}
+
+run_loop() {
+  mkdir -p "$runtime_dir" "$state_dir"
+  chmod 0700 "$runtime_dir" "$state_dir"
+  while true; do
+    dispatch_due
+    sleep 5
+  done
+}
+
+case "${1:-start}" in
+  start)
+    if daemon_is_live; then
+      echo "Reminder daemon already running."
+      exit 0
+    fi
+    mkdir -p "$runtime_dir" "$state_dir"
+    setsid -f /usr/bin/env bash -c '
+      pid_file="$1"; log_file="$2"
+      printf "%s\n" "$$" > "$pid_file"
+      exec "$0" run-loop "$pid_file" "$log_file"
+    ' /usr/local/bin/omarchy-reminder-daemon "$pid_file" "$log_file" >>"$log_file" 2>&1
+    ;;
+  run-loop)
+    run_loop
+    ;;
+  stop)
+    if daemon_is_live; then
+      read -r pid < "$pid_file"
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+    ;;
+  status)
+    if daemon_is_live; then
+      read -r pid < "$pid_file"
+      echo "Reminder daemon is running (PID $pid)."
+    else
+      echo "Reminder daemon is stopped."
+      exit 1
+    fi
+    ;;
+  *)
+    echo "usage: $0 {start|stop|status}" >&2
+    exit 2
+    ;;
+esac

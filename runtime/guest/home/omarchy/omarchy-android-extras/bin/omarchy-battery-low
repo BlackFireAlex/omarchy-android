@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#
+# omarchy-battery-low — run battery-low hooks for the Omarchy Android port.
+#
+# Upstream triggered ~/.config/omarchy/hooks/battery-low.d/ from a systemd unit.
+# With no systemd in the PRoot guest, a periodic caller runs this helper; the
+# agents-usage daemon loop or a short sleep-loop can invoke it on a cadence.
+# Hooks must be executable files that exit 0.
+
+set -euo pipefail
+
+hooks_dir="${OMARCHY_BATTERY_LOW_HOOKS_DIR:-$HOME/.config/omarchy/hooks/battery-low.d}"
+[[ -d "$hooks_dir" ]] || exit 0
+
+hook_failed=0
+for hook in "$hooks_dir"/*; do
+  [[ -x "$hook" && -f "$hook" ]] || continue
+  if ! "$hook"; then
+    echo "battery-low hook failed: $hook" >&2
+    hook_failed=1
+  fi
+done
+exit "$hook_failed"

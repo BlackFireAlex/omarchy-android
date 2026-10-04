@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#
+# omarchy-notification-battery — battery notice for the Omarchy Android port.
+#
+# Backs Super+Ctrl+Alt+B. Reads the Android battery via omarchy-battery-status
+# (the Android shim) and raises a notify-send notification, matching the
+# upstream notice behavior without a systemd timer.
+
+set -euo pipefail
+
+this_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+status_output="$("$this_dir/omarchy-battery-status" 2>/dev/null || true)"
+
+percentage="$(printf '%s\n' "$status_output" | sed -n 's/^percentage=//p' | head -n1)"
+status="$(printf '%s\n' "$status_output" | sed -n 's/^status=//p' | head -n1)"
+source="$(printf '%s\n' "$status_output" | sed -n 's/^source=//p' | head -n1)"
+
+if [[ -z "$percentage" || "$percentage" == unknown ]]; then
+  notify-send -a Omarchy "Battery" "Battery state is unavailable under PRoot." >/dev/null 2>&1 || true
+  exit 0
+fi
+
+case "$status" in
+  charging) summary="Battery $percentage% (charging)" ;;
+  discharging) summary="Battery $percentage% (on battery)" ;;
+  full) summary="Battery full" ;;
+  *) summary="Battery $percentage%" ;;
+esac
+notify-send -a Omarchy "Power" "$summary (via ${source})" >/dev/null 2>&1 || true

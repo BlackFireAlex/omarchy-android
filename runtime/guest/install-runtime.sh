@@ -21,7 +21,9 @@ cleanup() {
   rm -f -- "$file_list"
 }
 trap cleanup EXIT
-find "$template_root" -type f -print0 > "$file_list"
+# `.orig` files are repository-only backups and must not be installed into the
+# image (they are not runtime content and would confuse users / bloat the rootfs).
+find "$template_root" -type f ! -name '*.orig' -print0 > "$file_list"
 
 while IFS= read -r -d '' source_file; do
   relative_path="${source_file#"$template_root"/}"
@@ -30,7 +32,7 @@ while IFS= read -r -d '' source_file; do
 done < "$file_list"
 
 if [[ -d "$system_template_root" ]]; then
-  find "$system_template_root" -type f -print0 > "$file_list"
+  find "$system_template_root" -type f ! -name '*.orig' -print0 > "$file_list"
   while IFS= read -r -d '' source_file; do
     relative_path="${source_file#"$system_template_root"/}"
     destination="$target_root/$relative_path"

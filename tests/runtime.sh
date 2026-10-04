@@ -22,6 +22,7 @@ expected_files=(
   home/omarchy/.config/hypr/bindings.lua
   home/omarchy/.config/hypr/hyprland.lua
   home/omarchy/.config/hypr/input.lua
+  home/omarchy/.config/hypr/input/pointer.lua
   home/omarchy/.config/hypr/looknfeel.lua
   home/omarchy/.config/hypr/monitors.lua
   home/omarchy/.config/chromium-flags.conf
@@ -29,6 +30,17 @@ expected_files=(
   home/omarchy/.config/omarchy/dbus-services/ca.desrt.dconf.service
   home/omarchy/.config/omarchy/proot-session-bus.conf
   home/omarchy/.local/share/applications/org.gnome.Nautilus.desktop
+  home/omarchy/omarchy-android-extras/README.md
+  home/omarchy/omarchy-android-extras/autostart-addons.lua
+  home/omarchy/omarchy-android-extras/install.sh
+  home/omarchy/omarchy-android-extras/bin/omarchy-reminder
+  home/omarchy/omarchy-android-extras/bin/omarchy-reminder-daemon
+  home/omarchy/omarchy-android-extras/bin/omarchy-agents-usage-daemon
+  home/omarchy/omarchy-android-extras/bin/omarchy-battery-low
+  home/omarchy/omarchy-android-extras/bin/omarchy-battery-status
+  home/omarchy/omarchy-android-extras/bin/omarchy-brightness
+  home/omarchy/omarchy-android-extras/bin/omarchy-notification-battery
+  home/omarchy/omarchy-android-extras/hooks/battery-low.d/010-notify
   usr/local/bin/Xwayland
   usr/local/bin/omarchy-dbus-service
   usr/local/bin/omarchy-voxtype-daemon

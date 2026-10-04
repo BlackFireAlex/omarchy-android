@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#
+# omarchy-agents-usage-daemon — periodic AI-agent usage regenerator for Omarchy.
+#
+# Upstream regenerates Claude/Codex/Fireworks usage on a 15-minute systemd
+# timer feeding the agents panel. There is no systemd in the PRoot guest, so
+# this foreground sleep-loop daemon (started from autostart-addons.lua) invokes
+# `omarchy agent usage-update` on the same cadence.
+#
+#   start | stop | status
+
+set -euo pipefail
+
+interval_seconds="${OMARCHY_AGENTS_USAGE_INTERVAL:-900}"   # 15 minutes
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+pid_file="$runtime_dir/omarchy-agents-usage-daemon.pid"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+log_file="$state_dir/agents-usage-daemon.log"
+
+daemon_is_live() {
+  local pid cmdline
+  [[ -r "$pid_file" ]] || return 1
+  read -r pid < "$pid_file"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+  cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  [[ "$cmdline" == *omarchy-agents-usage-daemon* ]]
+}
+
+run_loop() {
+  mkdir -p "$runtime_dir" "$state_dir"
+  chmod 0700 "$runtime_dir" "$state_dir"
+  while true; do
+    if command -v omarchy >/dev/null 2>&1; then
+      omarchy agent usage-update >>"$log_file" 2>&1 || true
+    fi
+    sleep "$interval_seconds"
+  done
+}
+
+case "${1:-start}" in
+  start)
+    if daemon_is_live; then
+      echo "Agents-usage daemon already running."
+      exit 0
+    fi
+    mkdir -p "$runtime_dir" "$state_dir"
+    setsid -f /usr/bin/env bash -c '
+      pid_file="$1"; log_file="$2"
+      printf "%s\n" "$$" > "$pid_file"
+      exec "$0" run-loop "$pid_file" "$log_file"
+    ' /usr/local/bin/omarchy-agents-usage-daemon "$pid_file" "$log_file" >>"$log_file" 2>&1
+    ;;
+  run-loop)
+    run_loop
+    ;;
+  stop)
+    if daemon_is_live; then
+      read -r pid < "$pid_file"
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+    ;;
+  status)
+    if daemon_is_live; then
+      read -r pid < "$pid_file"
+      echo "Agents-usage daemon is running (PID $pid)."
+    else
+      echo "Agents-usage daemon is stopped."
+      exit 1
+    fi
+    ;;
+  *)
+    echo "usage: $0 {start|stop|status}" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#
+# omarchy-battery-status — Android battery shim for the Omarchy PRoot guest.
+#
+# The original Omarchy battery tooling read /sys/class/power_supply, but the
+# PRoot guest usually has no battery sysfs. This shim prefers Android's
+# termux-battery-status (termux-api) and falls back to the sysfs battery or a
+# plain "unknown". The shell panels and battery notices (Super+Ctrl+Alt+B) call
+# it. Output is stable key=value lines:
+#
+#   source=android|sysfs|unknown
+#   percentage=<0-100>
+#   status=charging|discharging|full|unknown
+
+set -euo pipefail
+
+print_status() {
+  printf 'source=%s\n' "$1"
+  printf 'percentage=%s\n' "$2"
+  printf 'status=%s\n' "$3"
+}
+
+if command -v termux-battery-status >/dev/null 2>&1; then
+  data="$(termux-battery-status 2>/dev/null || true)"
+  if [[ -n "$data" ]] && command -v jq >/dev/null 2>&1; then
+    percentage="$(jq -r '.percentage // "unknown"' <<<"$data" 2>/dev/null || echo unknown)"
+    plugged="$(jq -r '.plugged // "UNPLUGGED"' <<<"$data" 2>/dev/null || echo UNPLUGGED)"
+    status=unknown
+    case "$plugged" in
+      AC|USB|WIRELESS|PLUGGED) status=charging ;;
+      UNPLUGGED|*) status=discharging ;;
+    esac
+    print_status android "${percentage}" "${status}"
+    exit 0
+  fi
+fi
+
+if [[ -d /sys/class/power_supply ]]; then
+  battery="" node=""
+  for node in /sys/class/power_supply/*; do
+    [[ -e "$node/type" ]] && [[ "$(cat "$node/type" 2>/dev/null)" == Battery ]] && battery="$node" && break
+  done
+  if [[ -n "$battery" && -r "$battery/capacity" ]]; then
+    percentage="$(cat "$battery/capacity" 2>/dev/null || true)"
+    status=unknown
+    [[ -r "$battery/status" ]] && status="$(tr '[:upper:]' '[:lower:]' < "$battery/status" 2>/dev/null || true)"
+    print_status sysfs "${percentage:-unknown}" "${status:-unknown}"
+    exit 0
+  fi
+fi
+
+print_status unknown unknown unknown
+exit 0
