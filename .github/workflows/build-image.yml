@@ -21,6 +21,18 @@ on:
       - runtime/guest/**
       - scripts/**
       - lib/**
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-image.yml
+      - builder/**
+      - licenses/**
+      - manifest/**
+      - patches/**
+      - runtime/guest/**
+      - scripts/**
+      - lib/**
 
 permissions:
   contents: read
@@ -31,6 +43,8 @@ concurrency:
 
 jobs:
   image:
+    # Build PRs from this repository only; fork PRs are not built here.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     outputs:
